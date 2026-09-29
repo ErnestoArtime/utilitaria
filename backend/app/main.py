@@ -104,6 +104,17 @@ class DeviceToken(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class WhatsAppConfig(Base):
+    __tablename__ = "whatsapp_config"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    recipients: Mapped[list] = mapped_column(JSON, default=list)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    transfer_received: Mapped[bool] = mapped_column(Boolean, default=True)
+    transfer_sent: Mapped[bool] = mapped_column(Boolean, default=True)
+    balance_changes: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 Base.metadata.create_all(engine)
 
 
@@ -222,6 +233,28 @@ class RuleOut(RuleIn):
 class DeviceTokenIn(BaseModel):
     token: str = Field(min_length=20, max_length=4096)
     name: str = Field(default="Android", min_length=1, max_length=100)
+
+
+class WhatsAppConfigIn(BaseModel):
+    recipients: list[str] = Field(default_factory=list)
+    enabled: bool = True
+    transfer_received: bool = True
+    transfer_sent: bool = True
+    balance_changes: bool = True
+
+
+class WhatsAppConfigOut(WhatsAppConfigIn):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    updated_at: datetime
+
+
+class WhatsAppTestIn(BaseModel):
+    message: str = Field(
+        default="Prueba de Utilitaria: OpenWA está conectado correctamente.",
+        min_length=1,
+        max_length=4096,
+    )
 
 
 def serialize_alert_target(item: AlertTarget) -> dict:
@@ -435,6 +468,26 @@ def create_notification(payload: NotificationIn):
             )
         db.commit()
         db.refresh(item)
+        if parsed:
+            direction = "realizada" if outgoing else "recibida"
+            counterparty_text = f" de {counterparty}" if counterparty else ""
+            amount_text = f"{amount:.2f} {currency}"
+            notify_whatsapp(
+                db,
+                "transfer_sent" if outgoing else "transfer_received",
+                f"Utilitaria · Transferencia {direction}\n{amount_text}{counterparty_text}\n{description}",
+            )
+            balance_total = sum(
+                (row.amount for row in db.scalars(
+                    select(BalanceEntry).where(BalanceEntry.is_business.is_(False))
+                )),
+                Decimal("0.00"),
+            )
+            notify_whatsapp(
+                db,
+                "balance_changed",
+                f"Utilitaria · Cambio de saldo\nSaldo común: {balance_total:.2f} EUR\nMotivo: {description}",
+            )
         return item
 
 
@@ -495,6 +548,25 @@ def add_balance_entry(payload: BalanceIn):
         db.add(item)
         db.commit()
         db.refresh(item)
+        if not item.is_business:
+            if item.kind == "transfer":
+                notify_whatsapp(
+                    db,
+                    "transfer_sent" if item.amount < 0 else "transfer_received",
+                    f"Utilitaria · Transferencia {'realizada' if item.amount < 0 else 'recibida'}\n"
+                    f"{abs(item.amount):.2f} {item.currency}\n{item.description or 'Sin descripción'}",
+                )
+            balance_total = sum(
+                (row.amount for row in db.scalars(
+                    select(BalanceEntry).where(BalanceEntry.is_business.is_(False))
+                )),
+                Decimal("0.00"),
+            )
+            notify_whatsapp(
+                db,
+                "balance_changed",
+                f"Utilitaria · Cambio de saldo\nSaldo común: {balance_total:.2f} EUR\nMotivo: {item.description or 'Movimiento manual'}",
+            )
         return item
 
 
@@ -837,8 +909,24 @@ async def eltoque_rates():
     raise HTTPException(status_code=503, detail="No se pudieron obtener las tasas de elTOQUE: " + "; ".join(errors))
 
 
-@app.post("/api/whatsapp/send", dependencies=[Depends(auth)])
-async def send_whatsapp(to: str, message: str):
+WHATSAPP_DEFAULT_GROUP = "120363420329472237@g.us"
+
+
+def get_whatsapp_config(db: Session) -> WhatsAppConfig:
+    config = db.get(WhatsAppConfig, 1)
+    if config:
+        return config
+    config = WhatsAppConfig(
+        id=1,
+        recipients=[WHATSAPP_DEFAULT_GROUP],
+        updated_at=datetime.now(timezone.utc),
+    )
+    db.add(config)
+    db.flush()
+    return config
+
+
+def send_openwa_text(to: str, message: str) -> dict:
     base_url = os.getenv("OPENWA_BASE_URL")
     token = os.getenv("OPENWA_TOKEN") or os.getenv("API_MASTER_KEY")
     session_id = os.getenv("OPENWA_SESSION_ID")
@@ -846,11 +934,78 @@ async def send_whatsapp(to: str, message: str):
         raise HTTPException(status_code=503, detail="OpenWA is not configured")
     phone = re.sub(r"\D", "", to)
     chat_id = to if "@" in to else f"{phone}@c.us"
-    async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.post(
+    with httpx.Client(timeout=20) as client:
+        response = client.post(
             f"{base_url.rstrip('/')}/api/sessions/{session_id}/messages/send-text",
             headers={"X-API-Key": token},
             json={"chatId": chat_id, "text": message},
         )
     response.raise_for_status()
     return {"sent": True, "provider_response": response.json()}
+
+
+def notify_whatsapp(db: Session, event_type: str, message: str) -> dict:
+    config = get_whatsapp_config(db)
+    enabled = {
+        "transfer_received": config.transfer_received,
+        "transfer_sent": config.transfer_sent,
+        "balance_changed": config.balance_changes,
+    }.get(event_type, False)
+    recipients = [str(item).strip() for item in (config.recipients or []) if str(item).strip()]
+    if not config.enabled or not enabled or not recipients:
+        return {"sent": 0, "skipped": True}
+    sent = 0
+    failed = 0
+    for recipient in recipients:
+        try:
+            send_openwa_text(recipient, message)
+            sent += 1
+        except Exception:
+            failed += 1
+    return {"sent": sent, "failed": failed}
+
+
+@app.get("/api/whatsapp/config", response_model=WhatsAppConfigOut, dependencies=[Depends(auth)])
+def whatsapp_config():
+    with SessionLocal() as db:
+        config = get_whatsapp_config(db)
+        db.commit()
+        db.refresh(config)
+        return config
+
+
+@app.patch("/api/whatsapp/config", response_model=WhatsAppConfigOut, dependencies=[Depends(auth)])
+def update_whatsapp_config(payload: WhatsAppConfigIn):
+    with SessionLocal() as db:
+        config = get_whatsapp_config(db)
+        config.recipients = [item.strip() for item in payload.recipients if item.strip()]
+        config.enabled = payload.enabled
+        config.transfer_received = payload.transfer_received
+        config.transfer_sent = payload.transfer_sent
+        config.balance_changes = payload.balance_changes
+        config.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(config)
+        return config
+
+
+@app.post("/api/whatsapp/test", dependencies=[Depends(auth)])
+def test_whatsapp(payload: WhatsAppTestIn):
+    with SessionLocal() as db:
+        config = get_whatsapp_config(db)
+        recipients = [str(item).strip() for item in (config.recipients or []) if str(item).strip()]
+        if not recipients:
+            raise HTTPException(status_code=400, detail="No hay destinatarios configurados")
+        results = []
+        for recipient in recipients:
+            try:
+                result = send_openwa_text(recipient, payload.message)
+                results.append({"recipient": recipient, "sent": result["sent"]})
+            except Exception as exc:
+                results.append({"recipient": recipient, "sent": False, "error": str(exc)[:300]})
+        return {"results": results}
+
+
+@app.post("/api/whatsapp/send", dependencies=[Depends(auth)])
+def send_whatsapp(to: str, message: str):
+    return send_openwa_text(to, message)

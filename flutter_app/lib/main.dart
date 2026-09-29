@@ -1791,17 +1791,226 @@ class _MorePageState extends State<MorePage> with WidgetsBindingObserver {
         ListTile(
             leading: const Icon(Icons.send_outlined),
             title: const Text('WhatsApp / OpenWA'),
-            subtitle: const Text('Mensajes automáticos del negocio'),
-            onTap: () => showDialog(
-                context: context,
-                builder: (_) => const AlertDialog(
-                    title: Text('OpenWA'),
-                    content: Text(
-                        'El adaptador está preparado en el backend. Falta configurar el número y la plantilla de mensajes.')))),
+            subtitle: const Text('Destinatarios, avisos y prueba de envío'),
+            onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (_) => const WhatsAppSettingsPage()))),
       ]));
 
   void _showRules(BuildContext context) => Navigator.push(
       context, MaterialPageRoute(builder: (_) => const RulesPage()));
+}
+
+class WhatsAppSettingsPage extends StatefulWidget {
+  const WhatsAppSettingsPage({super.key});
+
+  @override
+  State<WhatsAppSettingsPage> createState() => _WhatsAppSettingsPageState();
+}
+
+class _WhatsAppSettingsPageState extends State<WhatsAppSettingsPage> {
+  final recipientsController = TextEditingController();
+  bool enabled = true;
+  bool transferReceived = true;
+  bool transferSent = true;
+  bool balanceChanges = true;
+  bool loading = true;
+  bool saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  @override
+  void dispose() {
+    recipientsController.dispose();
+    super.dispose();
+  }
+
+  Future<void> load() async {
+    try {
+      final data = Map<String, dynamic>.from(
+          await api.get('/api/whatsapp/config') as Map);
+      final values = data['recipients'] as List? ?? const [];
+      recipientsController.text = values.join('\n');
+      if (mounted) {
+        setState(() {
+          enabled = data['enabled'] == true;
+          transferReceived = data['transfer_received'] != false;
+          transferSent = data['transfer_sent'] != false;
+          balanceChanges = data['balance_changes'] != false;
+          loading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  List<String> get _recipients => recipientsController.text
+      .split(RegExp(r'[\n,]'))
+      .map((value) => value.trim())
+      .where((value) => value.isNotEmpty)
+      .toList();
+
+  Future<void> save() async {
+    setState(() => saving = true);
+    try {
+      await api.patch('/api/whatsapp/config', {
+        'recipients': _recipients,
+        'enabled': enabled,
+        'transfer_received': transferReceived,
+        'transfer_sent': transferSent,
+        'balance_changes': balanceChanges,
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Configuración de WhatsApp guardada.')));
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('No se pudo guardar. Revisa la conexión.')));
+      }
+    } finally {
+      if (mounted) setState(() => saving = false);
+    }
+  }
+
+  Future<void> sendTest() async {
+    try {
+      final result = Map<String, dynamic>.from(await api.post(
+          '/api/whatsapp/test', {
+        'message': 'Prueba de Utilitaria: OpenWA está conectado correctamente.'
+      }));
+      final sent = (result['results'] as List?)
+              ?.whereType<Map>()
+              .where((item) => item['sent'] == true)
+              .length ??
+          0;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(sent > 0
+                ? 'Mensaje de prueba enviado.'
+                : 'OpenWA no pudo enviar el mensaje.')));
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content:
+                Text('No se pudo enviar la prueba. Guarda y revisa OpenWA.')));
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: const ModernAppBar(title: 'WhatsApp', eyebrow: 'MÁS'),
+        body: loading
+            ? const Center(child: CircularProgressIndicator())
+            : RefreshIndicator(
+                onRefresh: load,
+                child: ListView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+                  children: [
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(18),
+                        child: Row(children: [
+                          const CircleAvatar(
+                              backgroundColor: Color(0xffdcf8e8),
+                              child: Icon(Icons.groups_rounded,
+                                  color: Color(0xff16844a))),
+                          const SizedBox(width: 14),
+                          Expanded(
+                              child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: const [
+                                Text('Glender Moviles',
+                                    style: TextStyle(
+                                        fontSize: 17,
+                                        fontWeight: FontWeight.w700)),
+                                SizedBox(height: 4),
+                                Text(
+                                    'Grupo configurado para los avisos de saldo',
+                                    style: TextStyle(color: Colors.black54)),
+                              ])),
+                        ]),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text('Destinatarios',
+                        style: Theme.of(context).textTheme.titleLarge),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: recipientsController,
+                      maxLines: 3,
+                      decoration: const InputDecoration(
+                        labelText: 'Chat ID o teléfono',
+                        hintText: '120363420329472237@g.us',
+                        helperText:
+                            'Puedes añadir uno por línea o separados por comas.',
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Card(
+                      child: Column(children: [
+                        SwitchListTile.adaptive(
+                            title: const Text('Avisos por WhatsApp'),
+                            subtitle:
+                                const Text('Activar o pausar todos los envíos'),
+                            value: enabled,
+                            onChanged: (value) =>
+                                setState(() => enabled = value)),
+                        const Divider(height: 1),
+                        SwitchListTile.adaptive(
+                            title: const Text('Transferencias recibidas'),
+                            value: transferReceived,
+                            onChanged: enabled
+                                ? (value) =>
+                                    setState(() => transferReceived = value)
+                                : null),
+                        SwitchListTile.adaptive(
+                            title: const Text('Transferencias realizadas'),
+                            value: transferSent,
+                            onChanged: enabled
+                                ? (value) =>
+                                    setState(() => transferSent = value)
+                                : null),
+                        SwitchListTile.adaptive(
+                            title: const Text('Cambios de saldo'),
+                            subtitle: const Text(
+                                'Nuevo saldo común después del movimiento'),
+                            value: balanceChanges,
+                            onChanged: enabled
+                                ? (value) =>
+                                    setState(() => balanceChanges = value)
+                                : null),
+                      ]),
+                    ),
+                    const SizedBox(height: 12),
+                    FilledButton.icon(
+                        onPressed: saving ? null : save,
+                        icon: saving
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2))
+                            : const Icon(Icons.save_outlined),
+                        label: const Text('Guardar configuración')),
+                    OutlinedButton.icon(
+                        onPressed: enabled ? sendTest : null,
+                        icon: const Icon(Icons.send_outlined),
+                        label: const Text('Enviar mensaje de prueba')),
+                  ],
+                ),
+              ),
+      );
 }
 
 class RatesPage extends StatefulWidget {

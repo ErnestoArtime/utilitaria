@@ -9,6 +9,7 @@ flutter_app/build/
 flutter_app/.flutter-plugins
 flutter_app/.flutter-plugins-dependencies
 flutter_app/android/.gradle/
+flutter_app/android/build/
 flutter_app/android/local.properties
 flutter_app/android/*.iml
 flutter_app/.idea/
