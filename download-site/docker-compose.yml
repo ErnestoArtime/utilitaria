@@ -1,0 +1,7 @@
+services:
+  utilitaria-downloads:
+    build: .
+    container_name: utilitaria-downloads
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8120:80"

@@ -1,0 +1,19 @@
+{
+  "project_info": {
+    "project_number": "601295798354",
+    "project_id": "coliseum-app-70cf5",
+    "storage_bucket": "coliseum-app-70cf5.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:601295798354:android:2c90e5c42eb40b0c2c1f8b",
+        "android_client_info": {"package_name": "com.example.utilitaria"}
+      },
+      "oauth_client": [],
+      "api_key": [{"current_key": "AIzaSyDzaAHpvrhIkvahECm9pUdqEtGwFId2JnI"}],
+      "services": {"appinvite_service": {"other_platform_oauth_client": []}}
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,0 +1,9 @@
+services:
+  utilitaria-web:
+    build:
+      context: ..
+      dockerfile: web-preview/Dockerfile
+    container_name: utilitaria-web
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8125:80"
