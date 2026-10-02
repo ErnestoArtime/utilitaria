@@ -824,12 +824,9 @@ class _FinancePageState extends State<FinancePage> {
                   const SizedBox(width: 8),
                   Expanded(
                       child: OutlinedButton.icon(
-                          onPressed: () => _movementDialog(
-                              initialKind: 'expense',
-                              initialMember: 'cousin',
-                              title: 'Entrega a mi primo'),
-                          icon: const Icon(Icons.payments_outlined),
-                          label: const Text('Entregar/retirar'))),
+                          onPressed: _memberTransferDialog,
+                          icon: const Icon(Icons.swap_horiz_rounded),
+                          label: const Text('Ajustar saldos'))),
                 ]),
                 const SizedBox(height: 20),
                 Row(
@@ -957,6 +954,94 @@ class _FinancePageState extends State<FinancePage> {
                             'member': member,
                             'currency': 'EUR',
                             'is_business': business
+                          });
+                          if (context.mounted) Navigator.pop(context);
+                          load();
+                        },
+                        child: const Text('Guardar'))
+                  ],
+                )));
+  }
+
+  Future<void> _memberTransferDialog() async {
+    final amount = TextEditingController();
+    final description = TextEditingController();
+    String fromMember = 'cousin';
+    String toMember = 'me';
+    await showDialog(
+        context: context,
+        builder: (_) => StatefulBuilder(
+            builder: (context, setDialog) => AlertDialog(
+                  title: const Text('Ajustar saldos'),
+                  content: SingleChildScrollView(
+                      child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    const Text(
+                        'Registra una compensación entre los dos saldos. El total común no cambia.'),
+                    const SizedBox(height: 14),
+                    TextField(
+                        controller: amount,
+                        keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true),
+                        decoration: const InputDecoration(
+                            labelText: 'Importe', prefixText: '€ ')),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                        initialValue: fromMember,
+                        decoration: const InputDecoration(labelText: 'Sale de'),
+                        items: const [
+                          DropdownMenuItem(
+                              value: 'me', child: Text('Mi saldo')),
+                          DropdownMenuItem(
+                              value: 'cousin',
+                              child: Text('Saldo de mi primo')),
+                          DropdownMenuItem(
+                              value: 'shared', child: Text('Saldo común'))
+                        ],
+                        onChanged: (value) =>
+                            setDialog(() => fromMember = value!)),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                        initialValue: toMember,
+                        decoration:
+                            const InputDecoration(labelText: 'Se suma a'),
+                        items: const [
+                          DropdownMenuItem(
+                              value: 'me', child: Text('Mi saldo')),
+                          DropdownMenuItem(
+                              value: 'cousin',
+                              child: Text('Saldo de mi primo')),
+                          DropdownMenuItem(
+                              value: 'shared', child: Text('Saldo común'))
+                        ],
+                        onChanged: (value) =>
+                            setDialog(() => toMember = value!)),
+                    const SizedBox(height: 12),
+                    TextField(
+                        controller: description,
+                        decoration: const InputDecoration(
+                            labelText: 'Descripción',
+                            hintText: 'Dinero entregado en efectivo')),
+                  ])),
+                  actions: [
+                    TextButton(
+                        onPressed: () => Navigator.pop(context),
+                        child: const Text('Cancelar')),
+                    FilledButton(
+                        onPressed: () async {
+                          final value = double.tryParse(
+                              amount.text.trim().replaceAll(',', '.'));
+                          if (value == null ||
+                              value <= 0 ||
+                              fromMember == toMember ||
+                              description.text.trim().isEmpty) {
+                            return;
+                          }
+                          await api.post('/api/balance/transfers', {
+                            'amount': value,
+                            'description': description.text.trim(),
+                            'from_member': fromMember,
+                            'to_member': toMember,
+                            'currency': 'EUR'
                           });
                           if (context.mounted) Navigator.pop(context);
                           load();

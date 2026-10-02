@@ -197,6 +197,15 @@ class BalanceIn(BaseModel):
     external_id: str | None = Field(default=None, max_length=500)
 
 
+class BalanceTransferIn(BaseModel):
+    amount: Decimal = Field(gt=0)
+    description: str = Field(min_length=1, max_length=500)
+    from_member: str = Field(pattern="^(me|cousin|shared)$")
+    to_member: str = Field(pattern="^(me|cousin|shared)$")
+    currency: str = "EUR"
+    created_at: datetime | None = None
+
+
 class BalanceOut(BalanceIn):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -355,7 +364,8 @@ def parse_decimal_amount(raw: str) -> Decimal:
 def parse_bank_receipt(title: str | None, body: str) -> tuple[Decimal, str, str | None] | None:
     text_value = f"{title or ''} {body}"
     amount_match = re.search(
-        r"(?:transferencia|bizum|abono|pago recibido|has recibido|ha recibido)"
+        r"(?:transferencia|bizum|abono|pago recibido|has recibido|ha recibido|"
+        r"compra|pago realizado|has hecho un pago|has hecho una compra)"
         r".{0,180}?(?:de\s+)?(\d[\d., ]*)\s*(euros?|eur|usd|cup|mlc)\b",
         text_value,
         flags=re.IGNORECASE,
@@ -372,6 +382,20 @@ def parse_bank_receipt(title: str | None, body: str) -> tuple[Decimal, str, str 
     )
     counterparty = counterparty_match.group(1).strip() if counterparty_match else None
     return amount, currency, counterparty
+
+
+def is_card_purchase(title: str | None, body: str) -> bool:
+    text_value = f"{title or ''} {body}".lower()
+    return any(
+        marker in text_value
+        for marker in (
+            "has hecho una compra",
+            "compra de",
+            "pago realizado",
+            "pago con tarjeta",
+            "compra con tarjeta",
+        )
+    )
 
 
 def is_outgoing_transfer(title: str | None, body: str) -> bool:
@@ -430,7 +454,9 @@ def create_notification(payload: NotificationIn):
             if existing:
                 return existing
         parsed = parse_bank_receipt(payload.title, payload.body)
-        outgoing = is_outgoing_transfer(payload.title, payload.body)
+        purchase = is_card_purchase(payload.title, payload.body)
+        outgoing_transfer = is_outgoing_transfer(payload.title, payload.body)
+        outgoing = outgoing_transfer or purchase
         values = payload.model_dump(exclude={"received_at"}, exclude_none=True)
         if parsed:
             amount, currency, counterparty = parsed
@@ -439,7 +465,13 @@ def create_notification(payload: NotificationIn):
                 parsed_amount=signed_amount,
                 currency=currency,
                 counterparty=payload.counterparty or counterparty,
-                category="transfer" if outgoing else "income",
+                category=(
+                    "transfer"
+                    if outgoing_transfer
+                    else "expense"
+                    if purchase
+                    else "income"
+                ),
             )
         item = Notification(**values, received_at=payload.received_at or datetime.now(timezone.utc))
         db.add(item)
@@ -447,10 +479,12 @@ def create_notification(payload: NotificationIn):
         if parsed:
             amount, currency, counterparty = parsed
             signed_amount = -amount if outgoing else amount
-            kind = "transfer" if outgoing else "income"
+            kind = "transfer" if outgoing_transfer else "expense" if purchase else "income"
             description = (
                 "Transferencia realizada"
-                if outgoing
+                if outgoing_transfer
+                else "Compra con tarjeta"
+                if purchase
                 else f"Ingreso recibido{f' de {counterparty}' if counterparty else ''}"
             )
             db.add(
@@ -461,7 +495,7 @@ def create_notification(payload: NotificationIn):
                     notification_id=item.id,
                     kind=kind,
                     category=kind,
-                    member="shared" if outgoing else "me",
+                    member="me" if purchase else "shared" if outgoing_transfer else "me",
                     currency=currency,
                     is_business=False,
                 )
@@ -472,11 +506,13 @@ def create_notification(payload: NotificationIn):
             direction = "realizada" if outgoing else "recibida"
             counterparty_text = f" de {counterparty}" if counterparty else ""
             amount_text = f"{amount:.2f} {currency}"
-            notify_whatsapp(
-                db,
-                "transfer_sent" if outgoing else "transfer_received",
-                f"Utilitaria · Transferencia {direction}\n{amount_text}{counterparty_text}\n{description}",
-            )
+            if purchase:
+                event_type = "balance_changed"
+                message = f"Utilitaria · Compra con tarjeta\n{amount_text}\n{description}"
+            else:
+                event_type = "transfer_sent" if outgoing else "transfer_received"
+                message = f"Utilitaria · Transferencia {direction}\n{amount_text}{counterparty_text}\n{description}"
+            notify_whatsapp(db, event_type, message)
             balance_total = sum(
                 (row.amount for row in db.scalars(
                     select(BalanceEntry).where(BalanceEntry.is_business.is_(False))
@@ -568,6 +604,45 @@ def add_balance_entry(payload: BalanceIn):
                 f"Utilitaria · Cambio de saldo\nSaldo común: {balance_total:.2f} EUR\nMotivo: {item.description or 'Movimiento manual'}",
             )
         return item
+
+
+@app.post("/api/balance/transfers", response_model=list[BalanceOut], dependencies=[Depends(auth)])
+def create_member_transfer(payload: BalanceTransferIn):
+    if payload.from_member == payload.to_member:
+        raise HTTPException(status_code=400, detail="Los participantes deben ser distintos")
+    with SessionLocal() as db:
+        timestamp = payload.created_at or datetime.now(timezone.utc)
+        debit = BalanceEntry(
+            amount=-payload.amount,
+            description=f"{payload.description} · sale de {payload.from_member}",
+            created_at=timestamp,
+            kind="member_transfer",
+            category="member_transfer",
+            member=payload.from_member,
+            currency=payload.currency,
+            is_business=False,
+        )
+        credit = BalanceEntry(
+            amount=payload.amount,
+            description=f"{payload.description} · entra a {payload.to_member}",
+            created_at=timestamp,
+            kind="member_transfer",
+            category="member_transfer",
+            member=payload.to_member,
+            currency=payload.currency,
+            is_business=False,
+        )
+        db.add_all([debit, credit])
+        db.commit()
+        db.refresh(debit)
+        db.refresh(credit)
+        notify_whatsapp(
+            db,
+            "balance_changed",
+            f"Utilitaria · Ajuste entre personas\n{payload.amount:.2f} {payload.currency}\n"
+            f"{payload.from_member} → {payload.to_member}\n{payload.description}",
+        )
+        return [debit, credit]
 
 
 @app.get("/api/balance", dependencies=[Depends(auth)])
