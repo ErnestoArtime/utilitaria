@@ -206,6 +206,16 @@ ROLE_PERMISSIONS = {
     "service": {"read", "write", "capture", "settings", "devices"},
 }
 
+MEMBER_NAMES = {
+    "me": "Ernesto",
+    "cousin": "Glender",
+    "shared": "Saldo común",
+}
+
+
+def member_name(member: str) -> str:
+    return MEMBER_NAMES.get(member, member)
+
 
 class Principal(BaseModel):
     credential_id: int | None = None
@@ -936,7 +946,7 @@ def create_member_transfer(payload: BalanceTransferIn):
         transfer_group_id = str(uuid.uuid4())
         debit = BalanceEntry(
             amount=-payload.amount,
-            description=f"{payload.description} · sale de {payload.from_member}",
+            description=f"{payload.description} · sale de {member_name(payload.from_member)}",
             created_at=timestamp,
             kind="member_transfer",
             category="member_transfer",
@@ -947,7 +957,7 @@ def create_member_transfer(payload: BalanceTransferIn):
         )
         credit = BalanceEntry(
             amount=payload.amount,
-            description=f"{payload.description} · entra a {payload.to_member}",
+            description=f"{payload.description} · entra a {member_name(payload.to_member)}",
             created_at=timestamp,
             kind="member_transfer",
             category="member_transfer",
@@ -964,7 +974,8 @@ def create_member_transfer(payload: BalanceTransferIn):
             db,
             "balance_changed",
             f"Utilitaria · Ajuste entre personas\n{payload.amount:.2f} {payload.currency}\n"
-            f"{payload.from_member} → {payload.to_member}\n{payload.description}",
+            f"{member_name(payload.from_member)} → {member_name(payload.to_member)}\n"
+            f"{payload.description}",
             dedupe_key=f"member-transfer:{transfer_group_id}",
         )
         return [debit, credit]
@@ -996,10 +1007,10 @@ def update_member_transfer(transfer_group_id: str, payload: BalanceTransferPatch
         description = payload.description or debit.description.split(" · sale de ", 1)[0]
         debit.amount = -amount
         debit.member = from_member
-        debit.description = f"{description} · sale de {from_member}"
+        debit.description = f"{description} · sale de {member_name(from_member)}"
         credit.amount = amount
         credit.member = to_member
-        credit.description = f"{description} · entra a {to_member}"
+        credit.description = f"{description} · entra a {member_name(to_member)}"
         db.commit()
         db.refresh(debit)
         db.refresh(credit)

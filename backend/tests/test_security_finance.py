@@ -112,6 +112,12 @@ def test_currency_is_not_mixed_and_linked_transfer_is_atomic(tmp_path):
     assert created.status_code == 200
     rows = created.json()
     assert sum(Decimal(row["amount"]) for row in rows) == Decimal("0")
+    with module.SessionLocal() as db:
+        transfer_notice = db.scalar(
+            module.select(module.WhatsAppOutbox)
+            .where(module.WhatsAppOutbox.dedupe_key.like("member-transfer:%"))
+        )
+        assert "Glender → Ernesto" in transfer_notice.message
     assert client.patch(
         f"/api/balance/entries/{rows[0]['id']}",
         headers=admin,

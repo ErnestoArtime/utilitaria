@@ -38,7 +38,7 @@ services:
       - /home/ernesto/proyectos/nx-monorepo/apps/coliseo-app/coliseum-app-70cf5-firebase-adminsdk-fbsvc-098144626f.json:/run/secrets/firebase-admin.json:ro
     environment:
       GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/firebase-admin.json
-      APP_VERSION: "0.9.1"
+      APP_VERSION: "0.9.2"
     mem_limit: 512m
     cpus: 1.0
   monitor:

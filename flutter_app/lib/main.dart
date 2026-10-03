@@ -509,9 +509,9 @@ class _HomePageState extends State<HomePage> {
                         items: const [
                           DropdownMenuItem(
                               value: 'shared', child: Text('Común')),
-                          DropdownMenuItem(value: 'me', child: Text('Yo')),
+                          DropdownMenuItem(value: 'me', child: Text('Ernesto')),
                           DropdownMenuItem(
-                              value: 'cousin', child: Text('Mi primo'))
+                              value: 'cousin', child: Text('Glender'))
                         ],
                         onChanged: (v) => setDialog(() => member = v!)),
                   ])),
@@ -680,8 +680,8 @@ class _FinancePageState extends State<FinancePage> {
       (double.tryParse('$raw') ?? 0).toStringAsFixed(2);
 
   String _memberLabel(String? member) => switch (member) {
-        'me' => 'Mío',
-        'cousin' => 'Mi primo',
+        'me' => 'Ernesto',
+        'cousin' => 'Glender',
         _ => 'Común / sin asignar',
       };
 
@@ -715,7 +715,7 @@ class _FinancePageState extends State<FinancePage> {
                 Row(children: [
                   Expanded(
                       child: _MemberCard(
-                          label: 'Mi saldo',
+                          label: 'Saldo de Ernesto',
                           value: _memberBalance('me'),
                           icon: Icons.person_outline,
                           selected: filter == 'me',
@@ -723,7 +723,7 @@ class _FinancePageState extends State<FinancePage> {
                   const SizedBox(width: 8),
                   Expanded(
                       child: _MemberCard(
-                          label: 'Saldo de mi primo',
+                          label: 'Saldo de Glender',
                           value: _memberBalance('cousin'),
                           icon: Icons.person_2_outlined,
                           selected: filter == 'cousin',
@@ -838,9 +838,9 @@ class _FinancePageState extends State<FinancePage> {
                         decoration:
                             const InputDecoration(labelText: '¿De quién es?'),
                         items: const [
-                          DropdownMenuItem(value: 'me', child: Text('Mío')),
+                          DropdownMenuItem(value: 'me', child: Text('Ernesto')),
                           DropdownMenuItem(
-                              value: 'cousin', child: Text('Mi primo')),
+                              value: 'cousin', child: Text('Glender')),
                           DropdownMenuItem(
                               value: 'shared',
                               child: Text('Común / sin asignar'))
@@ -917,11 +917,9 @@ class _FinancePageState extends State<FinancePage> {
                         initialValue: fromMember,
                         decoration: const InputDecoration(labelText: 'Sale de'),
                         items: const [
+                          DropdownMenuItem(value: 'me', child: Text('Ernesto')),
                           DropdownMenuItem(
-                              value: 'me', child: Text('Mi saldo')),
-                          DropdownMenuItem(
-                              value: 'cousin',
-                              child: Text('Saldo de mi primo')),
+                              value: 'cousin', child: Text('Glender')),
                           DropdownMenuItem(
                               value: 'shared', child: Text('Saldo común'))
                         ],
@@ -933,11 +931,9 @@ class _FinancePageState extends State<FinancePage> {
                         decoration:
                             const InputDecoration(labelText: 'Se suma a'),
                         items: const [
+                          DropdownMenuItem(value: 'me', child: Text('Ernesto')),
                           DropdownMenuItem(
-                              value: 'me', child: Text('Mi saldo')),
-                          DropdownMenuItem(
-                              value: 'cousin',
-                              child: Text('Saldo de mi primo')),
+                              value: 'cousin', child: Text('Glender')),
                           DropdownMenuItem(
                               value: 'shared', child: Text('Saldo común'))
                         ],
@@ -1000,9 +996,9 @@ class _FinancePageState extends State<FinancePage> {
                         decoration:
                             const InputDecoration(labelText: '¿De quién es?'),
                         items: const [
-                          DropdownMenuItem(value: 'me', child: Text('Mío')),
+                          DropdownMenuItem(value: 'me', child: Text('Ernesto')),
                           DropdownMenuItem(
-                              value: 'cousin', child: Text('Mi primo')),
+                              value: 'cousin', child: Text('Glender')),
                           DropdownMenuItem(
                               value: 'shared',
                               child: Text('Común / sin asignar'))
