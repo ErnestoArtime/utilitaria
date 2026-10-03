@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 
 import 'api_client.dart';
 
@@ -17,6 +19,7 @@ class AuthGate extends StatefulWidget {
 }
 
 class _AuthGateState extends State<AuthGate> {
+  static const settingsChannel = MethodChannel('utilitaria/settings');
   bool checking = true;
   bool authenticated = false;
 
@@ -33,6 +36,7 @@ class _AuthGateState extends State<AuthGate> {
         await api.get('/api/auth/me', useCache: false);
         authenticated = true;
         await widget.onAuthenticated?.call();
+        await _rescanAndroidNotifications();
       } on ApiException catch (error) {
         if (error.isUnauthorized) await api.clearAccessToken();
       } catch (_) {
@@ -46,6 +50,16 @@ class _AuthGateState extends State<AuthGate> {
   Future<void> _activated() async {
     setState(() => authenticated = true);
     await widget.onAuthenticated?.call();
+    await _rescanAndroidNotifications();
+  }
+
+  Future<void> _rescanAndroidNotifications() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      await settingsChannel.invokeMethod('rescanNotifications');
+    } catch (_) {
+      // El permiso puede no estar concedido todavía; el lector escaneará al conectarse.
+    }
   }
 
   @override

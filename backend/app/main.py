@@ -35,6 +35,7 @@ class Notification(Base):
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     body: Mapped[str] = mapped_column(Text)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     source: Mapped[str] = mapped_column(String(50), default="android")
     category: Mapped[str] = mapped_column(String(50), default="other")
     counterparty: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -160,6 +161,8 @@ def ensure_schema():
         "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS external_id VARCHAR(500)",
         "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS parsed_amount NUMERIC(12, 2)",
         "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS currency VARCHAR(10)",
+        "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS synced_at TIMESTAMP WITH TIME ZONE",
+        "UPDATE notifications SET synced_at = received_at WHERE synced_at IS NULL",
         "ALTER TABLE balance_entries ADD COLUMN IF NOT EXISTS kind VARCHAR(30) DEFAULT 'adjustment'",
         "ALTER TABLE balance_entries ADD COLUMN IF NOT EXISTS category VARCHAR(50) DEFAULT 'other'",
         "ALTER TABLE balance_entries ADD COLUMN IF NOT EXISTS member VARCHAR(100) DEFAULT 'shared'",
@@ -300,6 +303,7 @@ class NotificationOut(NotificationIn):
     model_config = ConfigDict(from_attributes=True)
     id: int
     received_at: datetime
+    synced_at: datetime
     parsed_amount: Decimal | None = None
     currency: str | None = None
 
@@ -732,7 +736,11 @@ def create_notification(payload: NotificationIn):
                     else "income"
                 ),
             )
-        item = Notification(**values, received_at=payload.received_at or datetime.now(timezone.utc))
+        item = Notification(
+            **values,
+            received_at=payload.received_at or datetime.now(timezone.utc),
+            synced_at=datetime.now(timezone.utc),
+        )
         db.add(item)
         db.flush()
         if parsed and currency == "EUR":

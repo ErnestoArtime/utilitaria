@@ -55,6 +55,7 @@ def test_enrollment_permissions_idempotency_and_privacy(tmp_path):
         "package_name": "com.ing.mobile",
         "title": "ING",
         "body": "Has recibido una transferencia de 25 EUR de PRIVADO",
+        "received_at": "2026-10-03T13:28:01Z",
     }
     first = client.post("/api/notifications", headers=capture, json=payload)
     second = client.post("/api/notifications", headers=capture, json=payload)
@@ -62,6 +63,8 @@ def test_enrollment_permissions_idempotency_and_privacy(tmp_path):
     assert second.status_code == 200
     assert first.json()["id"] == second.json()["id"]
     assert first.json()["shared_with_family"] is False
+    assert first.json()["received_at"].startswith("2026-10-03T13:28:01")
+    assert first.json()["synced_at"] is not None
 
     with module.SessionLocal() as db:
         notifications = list(db.scalars(module.select(module.Notification)))

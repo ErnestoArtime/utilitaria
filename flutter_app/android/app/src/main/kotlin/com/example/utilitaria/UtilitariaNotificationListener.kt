@@ -17,6 +17,12 @@ import java.util.TimeZone
 import java.util.concurrent.Executors
 
 class UtilitariaNotificationListener : NotificationListenerService() {
+    companion object {
+        @Volatile
+        var connectedInstance: UtilitariaNotificationListener? = null
+            private set
+    }
+
     private val executor = Executors.newSingleThreadExecutor()
     private val handler = Handler(Looper.getMainLooper())
     private val queueLock = Any()
@@ -55,9 +61,20 @@ class UtilitariaNotificationListener : NotificationListenerService() {
 
     override fun onListenerConnected() {
         super.onListenerConnected()
-        activeNotifications?.forEach(::onNotificationPosted)
+        connectedInstance = this
+        rescanActiveNotifications()
         handler.removeCallbacks(retryTask)
         handler.post(retryTask)
+    }
+
+    fun rescanActiveNotifications() {
+        activeNotifications?.forEach(::onNotificationPosted)
+        flushPending()
+    }
+
+    override fun onListenerDisconnected() {
+        connectedInstance = null
+        super.onListenerDisconnected()
     }
 
     private fun enqueue(item: JSONObject) = synchronized(queueLock) {
@@ -176,6 +193,7 @@ class UtilitariaNotificationListener : NotificationListenerService() {
         }.format(Date(timestamp))
 
     override fun onDestroy() {
+        connectedInstance = null
         handler.removeCallbacks(retryTask)
         executor.shutdown()
         super.onDestroy()

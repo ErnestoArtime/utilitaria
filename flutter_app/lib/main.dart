@@ -2341,6 +2341,15 @@ class NotificationTile extends StatelessWidget {
   final VoidCallback? onPrivate;
   const NotificationTile(
       {super.key, required this.data, this.onBusiness, this.onPrivate});
+
+  String _dateTime(dynamic raw) {
+    final value = DateTime.tryParse('$raw')?.toLocal();
+    if (value == null) return 'Hora desconocida';
+    String two(int number) => number.toString().padLeft(2, '0');
+    return '${two(value.day)}/${two(value.month)}/${value.year} · '
+        '${two(value.hour)}:${two(value.minute)}';
+  }
+
   @override
   Widget build(BuildContext context) => Card(
       child: ListTile(
@@ -2349,8 +2358,10 @@ class NotificationTile extends StatelessWidget {
               : Icons.notifications),
           title: Text(
               '${data['title'] ?? data['package_name'] ?? 'Notificación'}'),
-          subtitle: Text(
-              '${data['body'] ?? ''}\n${data['category'] ?? 'other'} · ${data['shared_with_family'] == true ? 'Compartida' : 'Privada'}'),
+          subtitle: Text('${data['body'] ?? ''}\n'
+              'Recibida: ${_dateTime(data['received_at'])}\n'
+              'Sincronizada: ${_dateTime(data['synced_at'])}\n'
+              '${data['category'] ?? 'other'} · ${data['shared_with_family'] == true ? 'Compartida' : 'Privada'}'),
           isThreeLine: true,
           trailing: PopupMenuButton<String>(
               onSelected: (value) {
