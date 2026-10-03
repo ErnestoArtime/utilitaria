@@ -9,7 +9,6 @@ val utilitariaKeystore = System.getenv("UTILITARIA_KEYSTORE")?.let(::file)
 val utilitariaKeystorePassword = System.getenv("UTILITARIA_KEYSTORE_PASSWORD")
 val utilitariaSigningReady = utilitariaKeystore?.exists() == true && !utilitariaKeystorePassword.isNullOrBlank()
 val utilitariaApiUrl = System.getenv("UTILITARIA_API_URL") ?: "https://utilitaria-api.eav-labs.com"
-val utilitariaApiKey = System.getenv("UTILITARIA_API_KEY") ?: ""
 
 android {
     namespace = "com.example.utilitaria"
@@ -35,7 +34,6 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         buildConfigField("String", "UTILITARIA_API_URL", "\"$utilitariaApiUrl\"")
-        buildConfigField("String", "UTILITARIA_API_KEY", "\"$utilitariaApiKey\"")
     }
 
     buildFeatures {

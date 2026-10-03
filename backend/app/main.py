@@ -1,15 +1,20 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import hashlib
 import html
+import hmac
 import os
 import re
+import secrets
+import uuid
 from urllib.parse import urlparse
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import Boolean, DateTime, JSON, Numeric, String, Text, create_engine, select, text
+from sqlalchemy import Boolean, DateTime, Integer, JSON, Numeric, String, Text, create_engine, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 
@@ -53,6 +58,7 @@ class BalanceEntry(Base):
     currency: Mapped[str] = mapped_column(String(10), default="EUR")
     is_business: Mapped[bool] = mapped_column(Boolean, default=False)
     external_id: Mapped[str | None] = mapped_column(String(500), nullable=True, index=True)
+    transfer_group_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
 
 
 class NotificationRule(Base):
@@ -115,6 +121,33 @@ class WhatsAppConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class ApiCredential(Base):
+    __tablename__ = "api_credentials"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    label: Mapped[str] = mapped_column(String(120))
+    role: Mapped[str] = mapped_column(String(30), default="member")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WhatsAppOutbox(Base):
+    __tablename__ = "whatsapp_outbox"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(50), index=True)
+    recipient: Mapped[str] = mapped_column(String(255))
+    message: Mapped[str] = mapped_column(Text)
+    dedupe_key: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 Base.metadata.create_all(engine)
 
 
@@ -133,6 +166,10 @@ def ensure_schema():
         "ALTER TABLE balance_entries ADD COLUMN IF NOT EXISTS currency VARCHAR(10) DEFAULT 'EUR'",
         "ALTER TABLE balance_entries ADD COLUMN IF NOT EXISTS is_business BOOLEAN DEFAULT FALSE",
         "ALTER TABLE balance_entries ADD COLUMN IF NOT EXISTS external_id VARCHAR(500)",
+        "ALTER TABLE balance_entries ADD COLUMN IF NOT EXISTS transfer_group_id VARCHAR(36)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_notifications_external_id ON notifications (external_id) WHERE external_id IS NOT NULL",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_balance_entries_external_id ON balance_entries (external_id) WHERE external_id IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS ix_balance_entries_transfer_group_id ON balance_entries (transfer_group_id)",
     ]
     with engine.begin() as connection:
         for statement in statements:
@@ -144,7 +181,7 @@ def ensure_schema():
 
 
 ensure_schema()
-app = FastAPI(title="Utilitaria API", version="0.1.0")
+app = FastAPI(title="Utilitaria API", version=os.getenv("APP_VERSION", "0.9.0"))
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -153,15 +190,98 @@ app.add_middleware(
     ],
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
-    allow_headers=["Content-Type", "X-API-Key"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
 
 _eltoque_cache: dict[str, object] | None = None
 
 
-def auth(x_api_key: str | None = Header(default=None)):
-    if API_KEY and x_api_key != API_KEY:
-        raise HTTPException(status_code=401, detail="invalid api key")
+ROLE_PERMISSIONS = {
+    "admin": {"read", "write", "capture", "settings", "devices"},
+    "member": {"read"},
+    "capture": {"capture"},
+    "service": {"read", "write", "capture", "settings", "devices"},
+}
+
+
+class Principal(BaseModel):
+    credential_id: int | None = None
+    label: str
+    role: str
+    permissions: set[str]
+    legacy: bool = False
+
+
+def token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def ensure_service_credential():
+    raw_token = os.getenv("SERVICE_API_TOKEN", "")
+    if not raw_token:
+        return
+    digest = token_hash(raw_token)
+    with SessionLocal() as db:
+        existing = db.scalar(select(ApiCredential).where(ApiCredential.token_hash == digest))
+        if existing:
+            if not existing.enabled or existing.revoked_at is not None:
+                existing.enabled = True
+                existing.revoked_at = None
+                db.commit()
+            return
+        db.add(
+            ApiCredential(
+                token_hash=digest,
+                label="Backend monitor",
+                role="service",
+                enabled=True,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        db.commit()
+
+
+ensure_service_credential()
+
+
+def auth(
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None),
+) -> Principal:
+    if authorization and authorization.lower().startswith("bearer "):
+        raw_token = authorization[7:].strip()
+        if raw_token:
+            with SessionLocal() as db:
+                credential = db.scalar(
+                    select(ApiCredential).where(ApiCredential.token_hash == token_hash(raw_token))
+                )
+                if credential and credential.enabled and credential.revoked_at is None:
+                    credential.last_seen_at = datetime.now(timezone.utc)
+                    db.commit()
+                    return Principal(
+                        credential_id=credential.id,
+                        label=credential.label,
+                        role=credential.role,
+                        permissions=ROLE_PERMISSIONS.get(credential.role, set()),
+                    )
+    allow_legacy = os.getenv("ALLOW_LEGACY_API_KEY", "false").lower() == "true"
+    if allow_legacy and API_KEY and x_api_key and hmac.compare_digest(x_api_key, API_KEY):
+        return Principal(
+            label="legacy-api-key",
+            role="service",
+            permissions=ROLE_PERMISSIONS["service"],
+            legacy=True,
+        )
+    raise HTTPException(status_code=401, detail="authentication required")
+
+
+def require_permission(permission: str):
+    def dependency(principal: Principal = Depends(auth)) -> Principal:
+        if permission not in principal.permissions:
+            raise HTTPException(status_code=403, detail="permission denied")
+        return principal
+
+    return dependency
 
 
 class NotificationIn(BaseModel):
@@ -191,7 +311,7 @@ class BalanceIn(BaseModel):
     kind: str = "adjustment"
     category: str = "other"
     member: str = "shared"
-    currency: str = "EUR"
+    currency: str = Field(default="EUR", pattern="^EUR$")
     is_business: bool = False
     created_at: datetime | None = None
     external_id: str | None = Field(default=None, max_length=500)
@@ -202,14 +322,22 @@ class BalanceTransferIn(BaseModel):
     description: str = Field(min_length=1, max_length=500)
     from_member: str = Field(pattern="^(me|cousin|shared)$")
     to_member: str = Field(pattern="^(me|cousin|shared)$")
-    currency: str = "EUR"
+    currency: str = Field(default="EUR", pattern="^EUR$")
     created_at: datetime | None = None
+
+
+class BalanceTransferPatch(BaseModel):
+    amount: Decimal | None = Field(default=None, gt=0)
+    description: str | None = Field(default=None, min_length=1, max_length=500)
+    from_member: str | None = Field(default=None, pattern="^(me|cousin|shared)$")
+    to_member: str | None = Field(default=None, pattern="^(me|cousin|shared)$")
 
 
 class BalanceOut(BalanceIn):
     model_config = ConfigDict(from_attributes=True)
     id: int
     created_at: datetime
+    transfer_group_id: str | None = None
 
 
 class BalancePatch(BaseModel):
@@ -264,6 +392,41 @@ class WhatsAppTestIn(BaseModel):
         min_length=1,
         max_length=4096,
     )
+
+
+class EnrollIn(BaseModel):
+    code: str = Field(min_length=8, max_length=255)
+    device_name: str = Field(min_length=1, max_length=120)
+
+
+class CredentialOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    label: str
+    role: str
+    enabled: bool
+    created_at: datetime
+    last_seen_at: datetime | None = None
+    revoked_at: datetime | None = None
+
+
+class EnrollOut(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    credential: CredentialOut
+
+
+class WhatsAppOutboxOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    event_type: str
+    recipient: str
+    status: str
+    attempts: int
+    created_at: datetime
+    next_attempt_at: datetime
+    sent_at: datetime | None = None
+    last_error: str | None = None
 
 
 def serialize_alert_target(item: AlertTarget) -> dict:
@@ -437,12 +600,106 @@ def is_ing_bank_operation(package_name: str, title: str | None, body: str) -> bo
     )
 
 
+def notification_share_allowed(db: Session, payload: NotificationIn) -> bool:
+    text_value = f"{payload.title or ''} {payload.body}".lower()
+    allowed = True
+    rules = db.scalars(select(NotificationRule).where(NotificationRule.enabled.is_(True)))
+    for rule in rules:
+        package_matches = not rule.package_name or rule.package_name.lower() == payload.package_name.lower()
+        text_matches = rule.text_contains.lower() in text_value
+        if not package_matches or not text_matches:
+            continue
+        if rule.action in {"exclude_share", "private", "drop"}:
+            allowed = False
+        elif rule.action in {"include_share", "share"}:
+            allowed = True
+    return allowed
+
+
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        return {"status": "ok", "version": app.version, "database": "ok"}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"database unavailable: {str(exc)[:120]}")
 
 
-@app.post("/api/notifications", response_model=NotificationOut, dependencies=[Depends(auth)])
+@app.post("/api/auth/enroll", response_model=EnrollOut)
+def enroll_device(payload: EnrollIn):
+    admin_code = os.getenv("ADMIN_ENROLLMENT_CODE", "")
+    member_code = os.getenv("MEMBER_ENROLLMENT_CODE", "")
+    capture_code = os.getenv("CAPTURE_ENROLLMENT_CODE", "")
+    role = None
+    for candidate, candidate_role in (
+        (admin_code, "admin"),
+        (member_code, "member"),
+        (capture_code, "capture"),
+    ):
+        if candidate and hmac.compare_digest(payload.code, candidate):
+            role = candidate_role
+            break
+    if role is None:
+        raise HTTPException(status_code=401, detail="Código de activación inválido")
+    raw_token = secrets.token_urlsafe(48)
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        credential = ApiCredential(
+            token_hash=token_hash(raw_token),
+            label=payload.device_name,
+            role=role,
+            enabled=True,
+            created_at=now,
+            last_seen_at=now,
+        )
+        db.add(credential)
+        db.commit()
+        db.refresh(credential)
+        return EnrollOut(access_token=raw_token, credential=credential)
+
+
+@app.get("/api/auth/me")
+def auth_me(principal: Principal = Depends(auth)):
+    return {
+        "id": principal.credential_id,
+        "label": principal.label,
+        "role": principal.role,
+        "permissions": sorted(principal.permissions),
+        "legacy": principal.legacy,
+    }
+
+
+@app.get(
+    "/api/auth/devices",
+    response_model=list[CredentialOut],
+    dependencies=[Depends(require_permission("devices"))],
+)
+def list_credentials():
+    with SessionLocal() as db:
+        return list(db.scalars(select(ApiCredential).order_by(ApiCredential.created_at.desc())))
+
+
+@app.post(
+    "/api/auth/devices/{credential_id}/revoke",
+    dependencies=[Depends(require_permission("devices"))],
+)
+def revoke_credential(credential_id: int):
+    with SessionLocal() as db:
+        credential = db.get(ApiCredential, credential_id)
+        if not credential:
+            raise HTTPException(status_code=404, detail="device not found")
+        credential.enabled = False
+        credential.revoked_at = datetime.now(timezone.utc)
+        db.commit()
+        return {"revoked": True, "id": credential.id}
+
+
+@app.post(
+    "/api/notifications",
+    response_model=NotificationOut,
+    dependencies=[Depends(require_permission("capture"))],
+)
 def create_notification(payload: NotificationIn):
     if not is_ing_bank_operation(payload.package_name, payload.title, payload.body):
         return Response(status_code=204)
@@ -457,7 +714,9 @@ def create_notification(payload: NotificationIn):
         purchase = is_card_purchase(payload.title, payload.body)
         outgoing_transfer = is_outgoing_transfer(payload.title, payload.body)
         outgoing = outgoing_transfer or purchase
+        share_allowed = notification_share_allowed(db, payload)
         values = payload.model_dump(exclude={"received_at"}, exclude_none=True)
+        values["shared_with_family"] = share_allowed
         if parsed:
             amount, currency, counterparty = parsed
             signed_amount = -amount if outgoing else amount
@@ -476,7 +735,7 @@ def create_notification(payload: NotificationIn):
         item = Notification(**values, received_at=payload.received_at or datetime.now(timezone.utc))
         db.add(item)
         db.flush()
-        if parsed:
+        if parsed and currency == "EUR":
             amount, currency, counterparty = parsed
             signed_amount = -amount if outgoing else amount
             kind = "transfer" if outgoing_transfer else "expense" if purchase else "income"
@@ -500,9 +759,26 @@ def create_notification(payload: NotificationIn):
                     is_business=False,
                 )
             )
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            if payload.external_id:
+                existing = db.scalar(
+                    select(Notification).where(Notification.external_id == payload.external_id)
+                )
+                if existing:
+                    return existing
+            raise
         db.refresh(item)
-        if parsed:
+        if parsed and share_allowed:
+            description = (
+                "Transferencia realizada"
+                if outgoing_transfer
+                else "Compra con tarjeta"
+                if purchase
+                else f"Ingreso recibido{f' de {counterparty}' if counterparty else ''}"
+            )
             direction = "realizada" if outgoing else "recibida"
             counterparty_text = f" de {counterparty}" if counterparty else ""
             amount_text = f"{amount:.2f} {currency}"
@@ -512,22 +788,32 @@ def create_notification(payload: NotificationIn):
             else:
                 event_type = "transfer_sent" if outgoing else "transfer_received"
                 message = f"Utilitaria · Transferencia {direction}\n{amount_text}{counterparty_text}\n{description}"
-            notify_whatsapp(db, event_type, message)
-            balance_total = sum(
-                (row.amount for row in db.scalars(
-                    select(BalanceEntry).where(BalanceEntry.is_business.is_(False))
-                )),
-                Decimal("0.00"),
-            )
             notify_whatsapp(
                 db,
-                "balance_changed",
-                f"Utilitaria · Cambio de saldo\nSaldo común: {balance_total:.2f} EUR\nMotivo: {description}",
+                event_type,
+                message,
+                dedupe_key=f"notification:{item.id}:{event_type}",
             )
+            if currency == "EUR":
+                balance_total = sum(
+                    (row.amount for row in db.scalars(
+                        select(BalanceEntry).where(
+                            BalanceEntry.is_business.is_(False),
+                            BalanceEntry.currency == "EUR",
+                        )
+                    )),
+                    Decimal("0.00"),
+                )
+                notify_whatsapp(
+                    db,
+                    "balance_changed",
+                    f"Utilitaria · Cambio de saldo\nSaldo común: {balance_total:.2f} EUR\nMotivo: {description}",
+                    dedupe_key=f"notification:{item.id}:balance_changed",
+                )
         return item
 
 
-@app.get("/api/notifications", response_model=list[NotificationOut], dependencies=[Depends(auth)])
+@app.get("/api/notifications", response_model=list[NotificationOut], dependencies=[Depends(require_permission("read"))])
 def list_notifications(limit: int = 100):
     with SessionLocal() as db:
         candidates = list(
@@ -544,7 +830,11 @@ def list_notifications(limit: int = 100):
         ][: min(limit, 500)]
 
 
-@app.patch("/api/notifications/{notification_id}", response_model=NotificationOut, dependencies=[Depends(auth)])
+@app.patch(
+    "/api/notifications/{notification_id}",
+    response_model=NotificationOut,
+    dependencies=[Depends(require_permission("write"))],
+)
 def update_notification(notification_id: int, payload: NotificationPatch):
     with SessionLocal() as db:
         item = db.get(Notification, notification_id)
@@ -567,7 +857,11 @@ def update_notification(notification_id: int, payload: NotificationPatch):
         return item
 
 
-@app.post("/api/balance/entries", response_model=BalanceOut, dependencies=[Depends(auth)])
+@app.post(
+    "/api/balance/entries",
+    response_model=BalanceOut,
+    dependencies=[Depends(require_permission("write"))],
+)
 def add_balance_entry(payload: BalanceIn):
     with SessionLocal() as db:
         if payload.external_id:
@@ -582,7 +876,17 @@ def add_balance_entry(payload: BalanceIn):
             created_at=payload.created_at or datetime.now(timezone.utc),
         )
         db.add(item)
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            if payload.external_id:
+                existing = db.scalar(
+                    select(BalanceEntry).where(BalanceEntry.external_id == payload.external_id)
+                )
+                if existing:
+                    return existing
+            raise
         db.refresh(item)
         if not item.is_business:
             if item.kind == "transfer":
@@ -591,10 +895,14 @@ def add_balance_entry(payload: BalanceIn):
                     "transfer_sent" if item.amount < 0 else "transfer_received",
                     f"Utilitaria · Transferencia {'realizada' if item.amount < 0 else 'recibida'}\n"
                     f"{abs(item.amount):.2f} {item.currency}\n{item.description or 'Sin descripción'}",
+                    dedupe_key=f"balance:{item.id}:transfer",
                 )
             balance_total = sum(
                 (row.amount for row in db.scalars(
-                    select(BalanceEntry).where(BalanceEntry.is_business.is_(False))
+                    select(BalanceEntry).where(
+                        BalanceEntry.is_business.is_(False),
+                        BalanceEntry.currency == "EUR",
+                    )
                 )),
                 Decimal("0.00"),
             )
@@ -602,16 +910,22 @@ def add_balance_entry(payload: BalanceIn):
                 db,
                 "balance_changed",
                 f"Utilitaria · Cambio de saldo\nSaldo común: {balance_total:.2f} EUR\nMotivo: {item.description or 'Movimiento manual'}",
+                dedupe_key=f"balance:{item.id}:balance_changed",
             )
         return item
 
 
-@app.post("/api/balance/transfers", response_model=list[BalanceOut], dependencies=[Depends(auth)])
+@app.post(
+    "/api/balance/transfers",
+    response_model=list[BalanceOut],
+    dependencies=[Depends(require_permission("write"))],
+)
 def create_member_transfer(payload: BalanceTransferIn):
     if payload.from_member == payload.to_member:
         raise HTTPException(status_code=400, detail="Los participantes deben ser distintos")
     with SessionLocal() as db:
         timestamp = payload.created_at or datetime.now(timezone.utc)
+        transfer_group_id = str(uuid.uuid4())
         debit = BalanceEntry(
             amount=-payload.amount,
             description=f"{payload.description} · sale de {payload.from_member}",
@@ -621,6 +935,7 @@ def create_member_transfer(payload: BalanceTransferIn):
             member=payload.from_member,
             currency=payload.currency,
             is_business=False,
+            transfer_group_id=transfer_group_id,
         )
         credit = BalanceEntry(
             amount=payload.amount,
@@ -631,6 +946,7 @@ def create_member_transfer(payload: BalanceTransferIn):
             member=payload.to_member,
             currency=payload.currency,
             is_business=False,
+            transfer_group_id=transfer_group_id,
         )
         db.add_all([debit, credit])
         db.commit()
@@ -641,19 +957,61 @@ def create_member_transfer(payload: BalanceTransferIn):
             "balance_changed",
             f"Utilitaria · Ajuste entre personas\n{payload.amount:.2f} {payload.currency}\n"
             f"{payload.from_member} → {payload.to_member}\n{payload.description}",
+            dedupe_key=f"member-transfer:{transfer_group_id}",
         )
         return [debit, credit]
 
 
-@app.get("/api/balance", dependencies=[Depends(auth)])
+@app.patch(
+    "/api/balance/transfers/{transfer_group_id}",
+    response_model=list[BalanceOut],
+    dependencies=[Depends(require_permission("write"))],
+)
+def update_member_transfer(transfer_group_id: str, payload: BalanceTransferPatch):
+    with SessionLocal() as db:
+        rows = list(
+            db.scalars(
+                select(BalanceEntry).where(BalanceEntry.transfer_group_id == transfer_group_id)
+            )
+        )
+        if len(rows) != 2:
+            raise HTTPException(status_code=404, detail="linked transfer not found")
+        debit = next((row for row in rows if row.amount < 0), None)
+        credit = next((row for row in rows if row.amount > 0), None)
+        if not debit or not credit:
+            raise HTTPException(status_code=409, detail="linked transfer is inconsistent")
+        amount = payload.amount or abs(debit.amount)
+        from_member = payload.from_member or debit.member
+        to_member = payload.to_member or credit.member
+        if from_member == to_member:
+            raise HTTPException(status_code=400, detail="Los participantes deben ser distintos")
+        description = payload.description or debit.description.split(" · sale de ", 1)[0]
+        debit.amount = -amount
+        debit.member = from_member
+        debit.description = f"{description} · sale de {from_member}"
+        credit.amount = amount
+        credit.member = to_member
+        credit.description = f"{description} · entra a {to_member}"
+        db.commit()
+        db.refresh(debit)
+        db.refresh(credit)
+        return [debit, credit]
+
+
+@app.get("/api/balance", dependencies=[Depends(require_permission("read"))])
 def current_balance():
     with SessionLocal() as db:
-        rows = db.scalars(select(BalanceEntry).where(BalanceEntry.is_business.is_(False)))
+        rows = db.scalars(
+            select(BalanceEntry).where(
+                BalanceEntry.is_business.is_(False),
+                BalanceEntry.currency == "EUR",
+            )
+        )
         total = sum((row.amount for row in rows), Decimal("0.00"))
         return {"amount": total, "currency": "EUR"}
 
 
-@app.get("/api/balance/entries", response_model=list[BalanceOut], dependencies=[Depends(auth)])
+@app.get("/api/balance/entries", response_model=list[BalanceOut], dependencies=[Depends(require_permission("read"))])
 def list_balance_entries(limit: int = 200):
     with SessionLocal() as db:
         return list(
@@ -665,12 +1023,21 @@ def list_balance_entries(limit: int = 200):
         )
 
 
-@app.patch("/api/balance/entries/{entry_id}", response_model=BalanceOut, dependencies=[Depends(auth)])
+@app.patch(
+    "/api/balance/entries/{entry_id}",
+    response_model=BalanceOut,
+    dependencies=[Depends(require_permission("write"))],
+)
 def update_balance_entry(entry_id: int, payload: BalancePatch):
     with SessionLocal() as db:
         item = db.get(BalanceEntry, entry_id)
         if not item:
             raise HTTPException(status_code=404, detail="balance entry not found")
+        if item.transfer_group_id or item.kind == "member_transfer":
+            raise HTTPException(
+                status_code=409,
+                detail="Los ajustes entre personas deben editarse como una operación vinculada",
+            )
         for key, value in payload.model_dump(exclude_none=True).items():
             setattr(item, key, value)
         db.commit()
@@ -678,19 +1045,25 @@ def update_balance_entry(entry_id: int, payload: BalancePatch):
         return item
 
 
-@app.get("/api/finance/summary", dependencies=[Depends(auth)])
+@app.get("/api/finance/summary", dependencies=[Depends(require_permission("read"))])
 def finance_summary():
     with SessionLocal() as db:
         rows = list(db.scalars(select(BalanceEntry).order_by(BalanceEntry.created_at.desc())))
-        total = sum((row.amount for row in rows if not row.is_business), Decimal("0.00"))
-        business = sum((row.amount for row in rows if row.is_business), Decimal("0.00"))
+        eur_rows = [row for row in rows if row.currency == "EUR"]
+        total = sum((row.amount for row in eur_rows if not row.is_business), Decimal("0.00"))
+        business = sum((row.amount for row in eur_rows if row.is_business), Decimal("0.00"))
         by_category: dict[str, Decimal] = {}
         by_member: dict[str, Decimal] = {
             "me": Decimal("0.00"),
             "cousin": Decimal("0.00"),
             "shared": Decimal("0.00"),
         }
+        by_currency: dict[str, Decimal] = {}
         for row in rows:
+            if not row.is_business:
+                by_currency[row.currency] = by_currency.get(row.currency, Decimal("0.00")) + row.amount
+            if row.currency != "EUR":
+                continue
             by_category[row.category] = by_category.get(row.category, Decimal("0.00")) + row.amount
             if not row.is_business:
                 member = row.member if row.member in by_member else "shared"
@@ -701,10 +1074,16 @@ def finance_summary():
             "entries": len(rows),
             "by_category": by_category,
             "by_member": by_member,
+            "by_currency": by_currency,
+            "currency": "EUR",
         }
 
 
-@app.post("/api/notification-rules", response_model=RuleOut, dependencies=[Depends(auth)])
+@app.post(
+    "/api/notification-rules",
+    response_model=RuleOut,
+    dependencies=[Depends(require_permission("settings"))],
+)
 def create_rule(payload: RuleIn):
     with SessionLocal() as db:
         item = NotificationRule(**payload.model_dump())
@@ -714,13 +1093,17 @@ def create_rule(payload: RuleIn):
         return item
 
 
-@app.get("/api/notification-rules", response_model=list[RuleOut], dependencies=[Depends(auth)])
+@app.get(
+    "/api/notification-rules",
+    response_model=list[RuleOut],
+    dependencies=[Depends(require_permission("settings"))],
+)
 def list_rules():
     with SessionLocal() as db:
         return list(db.scalars(select(NotificationRule).order_by(NotificationRule.id.desc())))
 
 
-@app.get("/api/solar/catalog", dependencies=[Depends(auth)])
+@app.get("/api/solar/catalog", dependencies=[Depends(require_permission("read"))])
 async def solar_catalog():
     base_url = (os.getenv("TIENDASOLAR_BASE_URL") or "https://solar.eav-labs.com").rstrip("/")
     if not base_url.startswith(("http://", "https://")):
@@ -731,7 +1114,7 @@ async def solar_catalog():
     return response.json()
 
 
-@app.get("/api/solar/image", dependencies=[Depends(auth)])
+@app.get("/api/solar/image", dependencies=[Depends(require_permission("read"))])
 async def solar_image(url: str):
     parsed = urlparse(url)
     allowed_hosts = {
@@ -753,7 +1136,7 @@ async def solar_image(url: str):
     )
 
 
-@app.get("/api/alerts", dependencies=[Depends(auth)])
+@app.get("/api/alerts", dependencies=[Depends(require_permission("read"))])
 def list_alerts():
     with SessionLocal() as db:
         targets = seed_alert_targets(db)
@@ -785,7 +1168,7 @@ def list_alerts():
         }
 
 
-@app.post("/api/alerts/check", dependencies=[Depends(auth)])
+@app.post("/api/alerts/check", dependencies=[Depends(require_permission("settings"))])
 async def check_alerts():
     from app.alerts import CHECKERS
 
@@ -839,7 +1222,7 @@ async def check_alerts():
     return {"checked_at": datetime.now(timezone.utc), "results": results}
 
 
-@app.post("/api/devices/register", dependencies=[Depends(auth)])
+@app.post("/api/devices/register", dependencies=[Depends(require_permission("read"))])
 def register_device(payload: DeviceTokenIn):
     now = datetime.now(timezone.utc)
     with SessionLocal() as db:
@@ -861,7 +1244,7 @@ def register_device(payload: DeviceTokenIn):
         return {"registered": True, "id": item.id}
 
 
-@app.get("/api/rates/eltoque", dependencies=[Depends(auth)])
+@app.get("/api/rates/eltoque", dependencies=[Depends(require_permission("read"))])
 async def eltoque_rates():
     global _eltoque_cache
     page_url = os.getenv("ELTOQUE_PAGE_URL", "https://eltoque.com/tasas-de-cambio-cuba")
@@ -1019,7 +1402,12 @@ def send_openwa_text(to: str, message: str) -> dict:
     return {"sent": True, "provider_response": response.json()}
 
 
-def notify_whatsapp(db: Session, event_type: str, message: str) -> dict:
+def notify_whatsapp(
+    db: Session,
+    event_type: str,
+    message: str,
+    dedupe_key: str | None = None,
+) -> dict:
     config = get_whatsapp_config(db)
     enabled = {
         "transfer_received": config.transfer_received,
@@ -1029,18 +1417,74 @@ def notify_whatsapp(db: Session, event_type: str, message: str) -> dict:
     recipients = [str(item).strip() for item in (config.recipients or []) if str(item).strip()]
     if not config.enabled or not enabled or not recipients:
         return {"sent": 0, "skipped": True}
-    sent = 0
-    failed = 0
+    queued = 0
     for recipient in recipients:
-        try:
-            send_openwa_text(recipient, message)
-            sent += 1
-        except Exception:
-            failed += 1
-    return {"sent": sent, "failed": failed}
+        recipient_key = f"{dedupe_key}:{recipient}" if dedupe_key else None
+        if recipient_key and db.scalar(
+            select(WhatsAppOutbox).where(WhatsAppOutbox.dedupe_key == recipient_key)
+        ):
+            continue
+        db.add(
+            WhatsAppOutbox(
+                event_type=event_type,
+                recipient=recipient,
+                message=message,
+                dedupe_key=recipient_key,
+                status="pending",
+                attempts=0,
+                next_attempt_at=datetime.now(timezone.utc),
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        queued += 1
+    db.commit()
+    return {"queued": queued, "skipped": queued == 0}
 
 
-@app.get("/api/whatsapp/config", response_model=WhatsAppConfigOut, dependencies=[Depends(auth)])
+def process_whatsapp_outbox_once(limit: int = 20) -> dict:
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        jobs = list(
+            db.scalars(
+                select(WhatsAppOutbox)
+                .where(
+                    WhatsAppOutbox.status.in_(["pending", "retry"]),
+                    WhatsAppOutbox.next_attempt_at <= now,
+                )
+                .order_by(WhatsAppOutbox.id)
+                .limit(limit)
+            )
+        )
+        sent = 0
+        failed = 0
+        for job in jobs:
+            job.status = "processing"
+            job.attempts += 1
+            db.commit()
+            try:
+                send_openwa_text(job.recipient, job.message)
+                job.status = "sent"
+                job.sent_at = datetime.now(timezone.utc)
+                job.last_error = None
+                sent += 1
+            except Exception as exc:
+                job.last_error = str(exc)[:1000]
+                if job.attempts >= 8:
+                    job.status = "failed"
+                else:
+                    job.status = "retry"
+                    delay_seconds = min(3600, 15 * (2 ** (job.attempts - 1)))
+                    job.next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+                failed += 1
+            db.commit()
+        return {"processed": len(jobs), "sent": sent, "failed": failed}
+
+
+@app.get(
+    "/api/whatsapp/config",
+    response_model=WhatsAppConfigOut,
+    dependencies=[Depends(require_permission("settings"))],
+)
 def whatsapp_config():
     with SessionLocal() as db:
         config = get_whatsapp_config(db)
@@ -1049,7 +1493,11 @@ def whatsapp_config():
         return config
 
 
-@app.patch("/api/whatsapp/config", response_model=WhatsAppConfigOut, dependencies=[Depends(auth)])
+@app.patch(
+    "/api/whatsapp/config",
+    response_model=WhatsAppConfigOut,
+    dependencies=[Depends(require_permission("settings"))],
+)
 def update_whatsapp_config(payload: WhatsAppConfigIn):
     with SessionLocal() as db:
         config = get_whatsapp_config(db)
@@ -1064,23 +1512,46 @@ def update_whatsapp_config(payload: WhatsAppConfigIn):
         return config
 
 
-@app.post("/api/whatsapp/test", dependencies=[Depends(auth)])
+@app.post("/api/whatsapp/test", dependencies=[Depends(require_permission("settings"))])
 def test_whatsapp(payload: WhatsAppTestIn):
     with SessionLocal() as db:
-        config = get_whatsapp_config(db)
-        recipients = [str(item).strip() for item in (config.recipients or []) if str(item).strip()]
-        if not recipients:
-            raise HTTPException(status_code=400, detail="No hay destinatarios configurados")
-        results = []
-        for recipient in recipients:
-            try:
-                result = send_openwa_text(recipient, payload.message)
-                results.append({"recipient": recipient, "sent": result["sent"]})
-            except Exception as exc:
-                results.append({"recipient": recipient, "sent": False, "error": str(exc)[:300]})
-        return {"results": results}
+        result = notify_whatsapp(
+            db,
+            "balance_changed",
+            payload.message,
+            dedupe_key=f"test:{uuid.uuid4()}",
+        )
+        return {"queued": result.get("queued", 0)}
 
 
-@app.post("/api/whatsapp/send", dependencies=[Depends(auth)])
+@app.get(
+    "/api/whatsapp/outbox",
+    response_model=list[WhatsAppOutboxOut],
+    dependencies=[Depends(require_permission("settings"))],
+)
+def whatsapp_outbox(limit: int = 100):
+    with SessionLocal() as db:
+        return list(
+            db.scalars(
+                select(WhatsAppOutbox)
+                .order_by(WhatsAppOutbox.created_at.desc())
+                .limit(min(limit, 500))
+            )
+        )
+
+
+@app.post("/api/whatsapp/send", dependencies=[Depends(require_permission("settings"))])
 def send_whatsapp(to: str, message: str):
-    return send_openwa_text(to, message)
+    with SessionLocal() as db:
+        job = WhatsAppOutbox(
+            event_type="manual",
+            recipient=to,
+            message=message,
+            status="pending",
+            attempts=0,
+            next_attempt_at=datetime.now(timezone.utc),
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(job)
+        db.commit()
+        return {"queued": True, "id": job.id}

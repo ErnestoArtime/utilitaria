@@ -1,18 +1,15 @@
 // Hallmark · pre-emit critique: P5 H5 E4 S4 R5 V4 · mobile utility workbench with catalogue rhythm.
-import 'dart:convert';
-
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-const apiBaseUrl = String.fromEnvironment('API_BASE_URL',
-    defaultValue: 'https://utilitaria-api.eav-labs.com');
-const apiKey = String.fromEnvironment('API_KEY');
+import 'core/api_client.dart';
+import 'core/auth_gate.dart';
+
+final requestedTab = ValueNotifier<int?>(null);
 
 @pragma('vm:entry-point')
 Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
@@ -33,7 +30,6 @@ Future<void> main() async {
     try {
       await Firebase.initializeApp();
       FirebaseMessaging.onBackgroundMessage(_firebaseBackgroundHandler);
-      _setupPush();
     } catch (error) {
       debugPrint('No se pudo iniciar Firebase: $error');
     }
@@ -52,6 +48,18 @@ Future<void> _setupPush() async {
     FirebaseMessaging.instance.onTokenRefresh.listen((value) {
       api.post('/api/devices/register', {'token': value, 'name': 'Android'});
     });
+    void openMessage(RemoteMessage message) {
+      requestedTab.value = switch (message.data['route']) {
+        '/notifications' => 1,
+        '/finance' => 2,
+        '/alerts' => 3,
+        _ => 0,
+      };
+    }
+
+    FirebaseMessaging.onMessageOpenedApp.listen(openMessage);
+    final initial = await FirebaseMessaging.instance.getInitialMessage();
+    if (initial != null) openMessage(initial);
   } catch (error) {
     debugPrint('No se pudo registrar el dispositivo: $error');
   }
@@ -119,7 +127,10 @@ class UtilitariaApp extends StatelessWidget {
                 padding: const EdgeInsets.symmetric(vertical: 16)),
           ),
         ),
-        home: const AppShell(),
+        home: AuthGate(
+          onAuthenticated: _setupPush,
+          child: const AppShell(),
+        ),
       );
 }
 
@@ -224,6 +235,24 @@ class _AppShellState extends State<AppShell> {
   ];
 
   @override
+  void initState() {
+    super.initState();
+    requestedTab.addListener(_handleRequestedTab);
+  }
+
+  void _handleRequestedTab() {
+    final target = requestedTab.value;
+    if (target != null && mounted) setState(() => index = target);
+    requestedTab.value = null;
+  }
+
+  @override
+  void dispose() {
+    requestedTab.removeListener(_handleRequestedTab);
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) => Scaffold(
         body: IndexedStack(index: index, children: pages),
         bottomNavigationBar: SafeArea(
@@ -260,107 +289,6 @@ class _AppShellState extends State<AppShell> {
         ),
       );
 }
-
-class CacheStatus {
-  final DateTime? updatedAt;
-  final bool offline;
-  final bool syncing;
-  const CacheStatus(
-      {this.updatedAt, this.offline = false, this.syncing = false});
-}
-
-class ApiClient {
-  final String baseUrl;
-  final Duration requestTimeout;
-  final http.Client _httpClient;
-  final ValueNotifier<int> cacheChanges = ValueNotifier(0);
-  final Map<String, CacheStatus> _statuses = {};
-  ApiClient(
-      {this.baseUrl = apiBaseUrl,
-      this.requestTimeout = const Duration(seconds: 4),
-      http.Client? httpClient})
-      : _httpClient = httpClient ?? http.Client();
-
-  Map<String, String> get headers => {
-        if (apiKey.isNotEmpty) 'X-API-Key': apiKey,
-      };
-
-  String _cacheKey(String path) =>
-      base64Url.encode(utf8.encode(path)).replaceAll('=', '');
-
-  CacheStatus status(String path) => _statuses[path] ?? const CacheStatus();
-
-  void _setStatus(String path, CacheStatus status) {
-    _statuses[path] = status;
-    cacheChanges.value++;
-  }
-
-  Future<dynamic> get(String path) async {
-    final preferences = await SharedPreferences.getInstance();
-    final key = _cacheKey(path);
-    final savedAt = preferences.getInt('api_cache_time_$key');
-    _setStatus(
-        path,
-        CacheStatus(
-            updatedAt: savedAt == null
-                ? null
-                : DateTime.fromMillisecondsSinceEpoch(savedAt),
-            syncing: true));
-    try {
-      final response = await _httpClient
-          .get(Uri.parse('$baseUrl$path'), headers: headers)
-          .timeout(requestTimeout);
-      if (response.statusCode >= 400) {
-        throw Exception('API ${response.statusCode}');
-      }
-      final decoded = jsonDecode(response.body);
-      final now = DateTime.now();
-      await preferences.setString('api_cache_body_$key', response.body);
-      await preferences.setInt(
-          'api_cache_time_$key', now.millisecondsSinceEpoch);
-      _setStatus(path, CacheStatus(updatedAt: now));
-      return decoded;
-    } catch (_) {
-      final cachedBody = preferences.getString('api_cache_body_$key');
-      final cachedAt = preferences.getInt('api_cache_time_$key');
-      _setStatus(
-          path,
-          CacheStatus(
-              updatedAt: cachedAt == null
-                  ? null
-                  : DateTime.fromMillisecondsSinceEpoch(cachedAt),
-              offline: true));
-      if (cachedBody != null) return jsonDecode(cachedBody);
-      rethrow;
-    }
-  }
-
-  Future<dynamic> post(String path, Map<String, dynamic> body) async {
-    final response = await _httpClient
-        .post(Uri.parse('$baseUrl$path'),
-            headers: {...headers, 'Content-Type': 'application/json'},
-            body: jsonEncode(body))
-        .timeout(const Duration(seconds: 12));
-    if (response.statusCode >= 400) {
-      throw Exception('API ${response.statusCode}');
-    }
-    return jsonDecode(response.body);
-  }
-
-  Future<dynamic> patch(String path, Map<String, dynamic> body) async {
-    final response = await _httpClient
-        .patch(Uri.parse('$baseUrl$path'),
-            headers: {...headers, 'Content-Type': 'application/json'},
-            body: jsonEncode(body))
-        .timeout(const Duration(seconds: 12));
-    if (response.statusCode >= 400) {
-      throw Exception('API ${response.statusCode}');
-    }
-    return jsonDecode(response.body);
-  }
-}
-
-final api = ApiClient();
 
 class SyncStatusBar extends StatelessWidget {
   final List<String> paths;
@@ -1745,13 +1673,22 @@ class _CatalogProductCard extends StatelessWidget {
                   color: AppPalette.canvas,
                   borderRadius: BorderRadius.circular(18)),
               padding: const EdgeInsets.all(14),
-              child: Image.network(proxiedImage,
-                  headers: {'X-API-Key': apiKey},
+              child: FutureBuilder<String?>(
+                future: api.accessToken(),
+                builder: (context, snapshot) => Image.network(
+                  proxiedImage,
+                  headers: {
+                    if (snapshot.data != null)
+                      'Authorization': 'Bearer ${snapshot.data}',
+                  },
                   fit: BoxFit.contain,
                   errorBuilder: (_, __, ___) => const Icon(
-                      Icons.solar_power_rounded,
-                      size: 44,
-                      color: AppPalette.blue)),
+                    Icons.solar_power_rounded,
+                    size: 44,
+                    color: AppPalette.blue,
+                  ),
+                ),
+              ),
             ),
           ),
           const SizedBox(height: 13),

@@ -6,8 +6,15 @@ import httpx
 
 async def main():
     interval = max(60, int(os.getenv("ALERT_CHECK_INTERVAL_SECONDS", "300")))
+    service_token = os.getenv("SERVICE_API_TOKEN", "")
     api_key = os.getenv("API_KEY", "")
-    headers = {"X-API-Key": api_key} if api_key else {}
+    headers = (
+        {"Authorization": f"Bearer {service_token}"}
+        if service_token
+        else {"X-API-Key": api_key}
+        if api_key
+        else {}
+    )
     async with httpx.AsyncClient(timeout=90, headers=headers) as client:
         while True:
             delay = interval

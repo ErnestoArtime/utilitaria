@@ -2,14 +2,21 @@
 
 Aplicación Android/Flutter para centralizar notificaciones, registrar transferencias, consultar un saldo operativo y disparar avisos por WhatsApp.
 
-## Arquitectura inicial
+## Arquitectura
 
 - `backend/`: FastAPI + PostgreSQL, ejecutable en el VPS con Docker Compose.
 - `flutter_app/`: cliente Flutter (Android primero).
 - Captura Android: `NotificationListenerService`, filtrando por paquetes permitidos y enviando eventos a la API.
 - Push: Firebase Cloud Messaging para alertas generadas por el backend.
 - WhatsApp: adaptador HTTP preparado para el despliegue OpenWA existente.
-- TiendaSolar: adaptador HTTP pendiente de conectar a su endpoint/webhook real.
+- Alertas: catálogo TiendaSolar y comprobación periódica de disponibilidad de
+  la bombona de gas de Goniogas, con avisos push ante cambios.
+- Acceso: credenciales revocables por dispositivo con roles `admin`, `member`,
+  `capture` y `service`; la APK no contiene una clave maestra.
+- Entrega: cola persistente Android para capturas y outbox con reintentos para
+  WhatsApp.
+- Respaldo: dump PostgreSQL diario verificado localmente y subida S3/R2 cuando
+  se configuran sus credenciales.
 
 ## Arranque del backend
 
@@ -20,6 +27,17 @@ docker compose up -d --build
 ```
 
 API: `http://localhost:8080` · documentación: `http://localhost:8080/docs`
+
+Los códigos de activación se generan fuera del repositorio con:
+
+```bash
+./scripts/rotate-auth-secrets.sh
+```
+
+Se guardan con permisos privados en
+`~/.config/utilitaria-auth/enrollment-codes`. Después de instalar la APK, se
+introduce el código de administrador en el teléfono principal y el código de
+miembro en el teléfono que solo debe consultar la información.
 
 Página privada de descargas: [descargas.eav-labs.com](https://descargas.eav-labs.com/)
 
@@ -44,11 +62,9 @@ La keystore y su contraseña viven fuera del repositorio, en `~/.config/utilitar
 
 En Android se debe conceder manualmente el permiso de acceso a notificaciones desde Ajustes. La captura de notificaciones solo es viable en Android; iOS no ofrece un equivalente general para leer notificaciones de otras apps.
 
-## Próximos datos necesarios
+## Operación pendiente
 
-1. URL, método y autenticación de OpenWA.
-2. URL/webhook o método de consulta de TiendaSolar.
-3. Lista final de paquetes bancarios que se deben leer y patrones de texto por banco.
-4. Dominio o IP HTTPS del VPS para configurar la app y Firebase.
+Configurar `S3_BACKUP_*` en `backend/.env` para que la copia diaria, que ya se
+genera y valida localmente, también quede fuera del VPS (por ejemplo en R2).
 
 No se deben guardar tokens reales en el repositorio: usar `.env` y secretos del VPS.
