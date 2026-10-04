@@ -1,7 +1,7 @@
 name: utilitaria
 description: Panel móvil para notificaciones, transferencias y saldo operativo.
 publish_to: "none"
-version: 0.9.2+19
+version: 0.9.3+20
 environment:
   sdk: ">=3.2.0 <4.0.0"
 dependencies:

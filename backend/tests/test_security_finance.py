@@ -118,6 +118,9 @@ def test_currency_is_not_mixed_and_linked_transfer_is_atomic(tmp_path):
             .where(module.WhatsAppOutbox.dedupe_key.like("member-transfer:%"))
         )
         assert "Glender → Ernesto" in transfer_notice.message
+        assert "Saldo de Glender: -15.00 EUR" in transfer_notice.message
+        assert "Saldo de Ernesto: 15.00 EUR" in transfer_notice.message
+        assert "Total común: 10.00 EUR" in transfer_notice.message
     assert client.patch(
         f"/api/balance/entries/{rows[0]['id']}",
         headers=admin,
@@ -132,3 +135,11 @@ def test_currency_is_not_mixed_and_linked_transfer_is_atomic(tmp_path):
     )
     assert updated.status_code == 200
     assert sum(Decimal(row["amount"]) for row in updated.json()) == Decimal("0")
+    with module.SessionLocal() as db:
+        update_notice = db.scalar(
+            module.select(module.WhatsAppOutbox)
+            .where(module.WhatsAppOutbox.message.like("Utilitaria · Ajuste actualizado%"))
+        )
+        assert "Saldo de Glender: -22.00 EUR" in update_notice.message
+        assert "Saldo de Ernesto: 22.00 EUR" in update_notice.message
+        assert "Total común: 10.00 EUR" in update_notice.message

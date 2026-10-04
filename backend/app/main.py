@@ -217,6 +217,29 @@ def member_name(member: str) -> str:
     return MEMBER_NAMES.get(member, member)
 
 
+def balance_snapshot(db: Session, currency: str = "EUR") -> tuple[dict[str, Decimal], Decimal]:
+    balances = {member: Decimal("0.00") for member in MEMBER_NAMES}
+    rows = db.scalars(
+        select(BalanceEntry).where(
+            BalanceEntry.is_business.is_(False),
+            BalanceEntry.currency == currency,
+        )
+    )
+    for row in rows:
+        balances[row.member] = balances.get(row.member, Decimal("0.00")) + row.amount
+    return balances, sum(balances.values(), Decimal("0.00"))
+
+
+def balance_message(db: Session, members: list[str], currency: str = "EUR") -> str:
+    balances, total = balance_snapshot(db, currency)
+    lines: list[str] = []
+    for member in dict.fromkeys(members):
+        label = "Saldo común sin asignar" if member == "shared" else f"Saldo de {member_name(member)}"
+        lines.append(f"{label}: {balances.get(member, Decimal('0.00')):.2f} {currency}")
+    lines.append(f"Total común: {total:.2f} {currency}")
+    return "\n".join(lines)
+
+
 class Principal(BaseModel):
     credential_id: int | None = None
     label: str
@@ -772,7 +795,7 @@ def create_notification(payload: NotificationIn):
                     notification_id=item.id,
                     kind=kind,
                     category=kind,
-                    member="me" if purchase else "shared" if outgoing_transfer else "me",
+                    member="me" if purchase else "cousin",
                     currency=currency,
                     is_business=False,
                 )
@@ -813,19 +836,11 @@ def create_notification(payload: NotificationIn):
                 dedupe_key=f"notification:{item.id}:{event_type}",
             )
             if currency == "EUR":
-                balance_total = sum(
-                    (row.amount for row in db.scalars(
-                        select(BalanceEntry).where(
-                            BalanceEntry.is_business.is_(False),
-                            BalanceEntry.currency == "EUR",
-                        )
-                    )),
-                    Decimal("0.00"),
-                )
+                affected_member = "me" if purchase else "cousin"
                 notify_whatsapp(
                     db,
                     "balance_changed",
-                    f"Utilitaria · Cambio de saldo\nSaldo común: {balance_total:.2f} EUR\nMotivo: {description}",
+                    f"Utilitaria · Cambio de saldo\n{balance_message(db, [affected_member])}\nMotivo: {description}",
                     dedupe_key=f"notification:{item.id}:balance_changed",
                 )
         return item
@@ -915,19 +930,11 @@ def add_balance_entry(payload: BalanceIn):
                     f"{abs(item.amount):.2f} {item.currency}\n{item.description or 'Sin descripción'}",
                     dedupe_key=f"balance:{item.id}:transfer",
                 )
-            balance_total = sum(
-                (row.amount for row in db.scalars(
-                    select(BalanceEntry).where(
-                        BalanceEntry.is_business.is_(False),
-                        BalanceEntry.currency == "EUR",
-                    )
-                )),
-                Decimal("0.00"),
-            )
             notify_whatsapp(
                 db,
                 "balance_changed",
-                f"Utilitaria · Cambio de saldo\nSaldo común: {balance_total:.2f} EUR\nMotivo: {item.description or 'Movimiento manual'}",
+                f"Utilitaria · Cambio de saldo\n{balance_message(db, [item.member], item.currency)}\n"
+                f"Motivo: {item.description or 'Movimiento manual'}",
                 dedupe_key=f"balance:{item.id}:balance_changed",
             )
         return item
@@ -975,7 +982,8 @@ def create_member_transfer(payload: BalanceTransferIn):
             "balance_changed",
             f"Utilitaria · Ajuste entre personas\n{payload.amount:.2f} {payload.currency}\n"
             f"{member_name(payload.from_member)} → {member_name(payload.to_member)}\n"
-            f"{payload.description}",
+            f"{balance_message(db, [payload.from_member, payload.to_member], payload.currency)}\n"
+            f"Motivo: {payload.description}",
             dedupe_key=f"member-transfer:{transfer_group_id}",
         )
         return [debit, credit]
@@ -1014,6 +1022,15 @@ def update_member_transfer(transfer_group_id: str, payload: BalanceTransferPatch
         db.commit()
         db.refresh(debit)
         db.refresh(credit)
+        notify_whatsapp(
+            db,
+            "balance_changed",
+            f"Utilitaria · Ajuste actualizado\n{amount:.2f} {debit.currency}\n"
+            f"{member_name(from_member)} → {member_name(to_member)}\n"
+            f"{balance_message(db, [from_member, to_member], debit.currency)}\n"
+            f"Motivo: {description}",
+            dedupe_key=f"member-transfer:{transfer_group_id}:update:{uuid.uuid4()}",
+        )
         return [debit, credit]
 
 
