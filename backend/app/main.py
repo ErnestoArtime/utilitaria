@@ -1326,58 +1326,89 @@ def list_alerts():
         }
 
 
-@app.post("/api/alerts/check", dependencies=[Depends(require_permission("settings"))])
-async def check_alerts():
+async def check_alert_target(db: Session, target: AlertTarget) -> dict:
     from app.alerts import CHECKERS
 
+    if not target.enabled or target.slug not in CHECKERS:
+        raise HTTPException(status_code=404, detail="alert target not available")
+    try:
+        result = await CHECKERS[target.slug]()
+        checked_at = datetime.now(timezone.utc)
+        previous_status = target.status
+        changed = target.fingerprint is not None and target.fingerprint != result["fingerprint"]
+        target.status = result["status"]
+        target.status_label = result["status_label"]
+        target.price = result.get("price")
+        target.fingerprint = result["fingerprint"]
+        target.details = result.get("details") or {}
+        target.last_checked_at = checked_at
+        target.last_error = None
+        push_result = None
+        if changed:
+            target.last_changed_at = checked_at
+            if target.group_name == "gas" and target.status == "available":
+                title = "¡Hay bombonas de gas disponibles!"
+            elif target.group_name == "gas":
+                title = "Cambió el estado de la bombona de gas"
+            else:
+                title = "Cambios en TiendaSolar"
+            message = f"{target.name}: {target.status_label}"
+            event = AlertEvent(
+                target_id=target.id,
+                previous_status=previous_status,
+                status=target.status,
+                title=title,
+                message=message,
+                created_at=checked_at,
+                details=target.details,
+            )
+            db.add(event)
+            db.flush()
+            push_result = send_alert_push(db, event, target)
+        db.commit()
+        return {
+            "slug": target.slug,
+            "ok": True,
+            "changed": changed,
+            "checked_at": checked_at,
+            "push": push_result,
+        }
+    except Exception as exc:
+        checked_at = datetime.now(timezone.utc)
+        target.last_checked_at = checked_at
+        target.last_error = str(exc)[:1000]
+        db.commit()
+        return {
+            "slug": target.slug,
+            "ok": False,
+            "checked_at": checked_at,
+            "error": target.last_error,
+        }
+
+
+@app.post("/api/alerts/check", dependencies=[Depends(require_permission("settings"))])
+async def check_alerts():
     results = []
     with SessionLocal() as db:
         targets = seed_alert_targets(db)
         for target in targets:
-            if not target.enabled or target.slug not in CHECKERS:
+            if not target.enabled:
                 continue
-            checked_at = datetime.now(timezone.utc)
-            try:
-                result = await CHECKERS[target.slug]()
-                previous_status = target.status
-                changed = target.fingerprint is not None and target.fingerprint != result["fingerprint"]
-                target.status = result["status"]
-                target.status_label = result["status_label"]
-                target.price = result.get("price")
-                target.fingerprint = result["fingerprint"]
-                target.details = result.get("details") or {}
-                target.last_checked_at = checked_at
-                target.last_error = None
-                push_result = None
-                if changed:
-                    target.last_changed_at = checked_at
-                    if target.group_name == "gas" and target.status == "available":
-                        title = "¡Hay bombonas de gas disponibles!"
-                    elif target.group_name == "gas":
-                        title = "Cambió el estado de la bombona de gas"
-                    else:
-                        title = "Cambios en TiendaSolar"
-                    message = f"{target.name}: {target.status_label}"
-                    event = AlertEvent(
-                        target_id=target.id,
-                        previous_status=previous_status,
-                        status=target.status,
-                        title=title,
-                        message=message,
-                        created_at=checked_at,
-                        details=target.details,
-                    )
-                    db.add(event)
-                    db.flush()
-                    push_result = send_alert_push(db, event, target)
-                db.commit()
-                results.append({"slug": target.slug, "ok": True, "changed": changed, "push": push_result})
-            except Exception as exc:
-                target.last_checked_at = checked_at
-                target.last_error = str(exc)[:1000]
-                db.commit()
-                results.append({"slug": target.slug, "ok": False, "error": target.last_error})
+            results.append(await check_alert_target(db, target))
     return {"checked_at": datetime.now(timezone.utc), "results": results}
+
+
+@app.post(
+    "/api/alerts/{slug}/check",
+    dependencies=[Depends(require_permission("settings"))],
+)
+async def check_single_alert(slug: str):
+    with SessionLocal() as db:
+        seed_alert_targets(db)
+        target = db.scalar(select(AlertTarget).where(AlertTarget.slug == slug))
+        if not target:
+            raise HTTPException(status_code=404, detail="alert target not found")
+        return await check_alert_target(db, target)
 
 
 @app.post("/api/devices/register", dependencies=[Depends(require_permission("read"))])

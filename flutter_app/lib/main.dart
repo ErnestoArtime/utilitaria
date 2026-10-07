@@ -982,7 +982,9 @@ class _FinancePageState extends State<FinancePage> {
       return;
     }
     final amount = TextEditingController(
-        text: (double.tryParse('${entry['amount']}') ?? 0).abs().toStringAsFixed(2));
+        text: (double.tryParse('${entry['amount']}') ?? 0)
+            .abs()
+            .toStringAsFixed(2));
     String kind = '${entry['kind'] ?? 'adjustment'}';
     if (!{'income', 'expense', 'transfer'}.contains(kind)) {
       kind = (double.tryParse('${entry['amount']}') ?? 0) >= 0
@@ -993,7 +995,8 @@ class _FinancePageState extends State<FinancePage> {
     bool business = entry['is_business'] == true;
     final description = TextEditingController(text: '${entry['description']}');
     DateTime createdAt =
-        DateTime.tryParse('${entry['created_at']}')?.toLocal() ?? DateTime.now();
+        DateTime.tryParse('${entry['created_at']}')?.toLocal() ??
+            DateTime.now();
     await showDialog(
         context: context,
         builder: (_) => StatefulBuilder(
@@ -1065,8 +1068,8 @@ class _FinancePageState extends State<FinancePage> {
                     TextButton.icon(
                         onPressed: () async {
                           if (!await _confirmDelete(context)) return;
-                          await api.delete(
-                              '/api/balance/entries/${entry['id']}');
+                          await api
+                              .delete('/api/balance/entries/${entry['id']}');
                           if (context.mounted) Navigator.pop(context);
                           load();
                         },
@@ -1115,22 +1118,25 @@ class _FinancePageState extends State<FinancePage> {
             (raw as Map<String, dynamic>)['transfer_group_id'] == groupId)
         .cast<Map<String, dynamic>>()
         .toList();
-    final debit = rows.where((row) =>
-        (double.tryParse('${row['amount']}') ?? 0) < 0).firstOrNull;
-    final credit = rows.where((row) =>
-        (double.tryParse('${row['amount']}') ?? 0) > 0).firstOrNull;
+    final debit = rows
+        .where((row) => (double.tryParse('${row['amount']}') ?? 0) < 0)
+        .firstOrNull;
+    final credit = rows
+        .where((row) => (double.tryParse('${row['amount']}') ?? 0) > 0)
+        .firstOrNull;
     if (debit == null || credit == null) return;
     final amount = TextEditingController(
         text: (double.tryParse('${debit['amount']}') ?? 0)
             .abs()
             .toStringAsFixed(2));
     final rawDescription = '${debit['description']}';
-    final description = TextEditingController(
-        text: rawDescription.split(' · sale de ').first);
+    final description =
+        TextEditingController(text: rawDescription.split(' · sale de ').first);
     String fromMember = '${debit['member']}';
     String toMember = '${credit['member']}';
     DateTime createdAt =
-        DateTime.tryParse('${debit['created_at']}')?.toLocal() ?? DateTime.now();
+        DateTime.tryParse('${debit['created_at']}')?.toLocal() ??
+            DateTime.now();
     await showDialog(
         context: context,
         builder: (_) => StatefulBuilder(
@@ -1159,7 +1165,8 @@ class _FinancePageState extends State<FinancePage> {
                     const SizedBox(height: 12),
                     DropdownButtonFormField<String>(
                         initialValue: toMember,
-                        decoration: const InputDecoration(labelText: 'Se suma a'),
+                        decoration:
+                            const InputDecoration(labelText: 'Se suma a'),
                         items: _memberItems(),
                         onChanged: (value) =>
                             setDialog(() => toMember = value!)),
@@ -1407,6 +1414,25 @@ class _AlertsPageState extends State<AlertsPage> {
     }
   }
 
+  Future<void> checkTarget(String slug, String label) async {
+    setState(() => checking = true);
+    try {
+      await api.post('/api/alerts/$slug/check', {});
+      await load();
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('$label actualizado ahora')));
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('No se pudo actualizar $label')));
+      }
+    } finally {
+      if (mounted) setState(() => checking = false);
+    }
+  }
+
   Color _statusColor(String status) => switch (status) {
         'available' || 'active' => Colors.green,
         'unavailable' => Colors.red,
@@ -1533,30 +1559,54 @@ class _AlertsPageState extends State<AlertsPage> {
                                                 style: const TextStyle(
                                                     color: Colors.red)),
                                           const SizedBox(height: 6),
-                                          Align(
-                                              alignment: Alignment.centerRight,
-                                              child: TextButton.icon(
-                                                  onPressed: () {
-                                                    if (isGas) {
-                                                      launchUrl(
-                                                          Uri.parse(
-                                                              '${item['url']}'),
-                                                          mode: LaunchMode
-                                                              .externalApplication);
-                                                    } else {
-                                                      Navigator.push(
-                                                          context,
-                                                          MaterialPageRoute(
-                                                              builder: (_) =>
-                                                                  const SolarCatalogPage()));
-                                                    }
-                                                  },
-                                                  icon: Icon(isGas
-                                                      ? Icons.open_in_new
-                                                      : Icons.grid_view),
-                                                  label: Text(isGas
-                                                      ? 'Abrir producto'
-                                                      : 'Ver catálogo')))
+                                          Row(
+                                              mainAxisAlignment:
+                                                  MainAxisAlignment.end,
+                                              children: [
+                                                if (isGas) ...[
+                                                  FilledButton.tonalIcon(
+                                                      onPressed: checking
+                                                          ? null
+                                                          : () => checkTarget(
+                                                              '${item['slug']}',
+                                                              'la disponibilidad del gas'),
+                                                      icon: checking
+                                                          ? const SizedBox(
+                                                              width: 16,
+                                                              height: 16,
+                                                              child:
+                                                                  CircularProgressIndicator(
+                                                                      strokeWidth:
+                                                                          2))
+                                                          : const Icon(Icons
+                                                              .refresh_rounded),
+                                                      label: const Text(
+                                                          'Comprobar ahora')),
+                                                  const SizedBox(width: 6),
+                                                ],
+                                                TextButton.icon(
+                                                    onPressed: () {
+                                                      if (isGas) {
+                                                        launchUrl(
+                                                            Uri.parse(
+                                                                '${item['url']}'),
+                                                            mode: LaunchMode
+                                                                .externalApplication);
+                                                      } else {
+                                                        Navigator.push(
+                                                            context,
+                                                            MaterialPageRoute(
+                                                                builder: (_) =>
+                                                                    const SolarCatalogPage()));
+                                                      }
+                                                    },
+                                                    icon: Icon(isGas
+                                                        ? Icons.open_in_new
+                                                        : Icons.grid_view),
+                                                    label: Text(isGas
+                                                        ? 'Abrir'
+                                                        : 'Ver catálogo'))
+                                              ])
                                         ])));
                           }),
                           const SizedBox(height: 18),

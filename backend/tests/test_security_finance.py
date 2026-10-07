@@ -1,7 +1,9 @@
 import importlib
 import os
 import sys
+from datetime import datetime
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 
@@ -240,3 +242,38 @@ def test_bank_notification_creates_one_rich_whatsapp_message(tmp_path):
     assert "De: MARCO SILVESTRI" in messages[1].message
     assert "Saldo de Glender: -690.00 EUR" in messages[1].message
     assert "Total común: -690.00 EUR" in messages[1].message
+
+
+def test_single_alert_check_and_cuba_schedule(tmp_path, monkeypatch):
+    module, client = load_app(tmp_path)
+    admin = enroll(client, "admin-test-code", "Admin")
+    from app import alerts, monitor
+
+    async def fake_gas_check():
+        return {
+            "status": "available",
+            "status_label": "Disponible · 4 unidades",
+            "price": "25,00 €",
+            "fingerprint": "gas-test-fingerprint",
+            "details": {"quantity": 4},
+        }
+
+    monkeypatch.setitem(alerts.CHECKERS, "gas-10kg-goniogas", fake_gas_check)
+    response = client.post(
+        "/api/alerts/gas-10kg-goniogas/check", headers=admin
+    )
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert response.json()["checked_at"] is not None
+    alerts_response = client.get("/api/alerts", headers=admin)
+    gas = alerts_response.json()["groups"][0]["items"][0]
+    assert gas["details"]["quantity"] == 4
+    assert gas["last_checked_at"] is not None
+
+    cuba = ZoneInfo("America/Havana")
+    assert monitor.gas_interval_seconds(
+        datetime(2026, 10, 7, 20, 0, tzinfo=cuba)
+    ) == 60
+    assert monitor.gas_interval_seconds(
+        datetime(2026, 10, 7, 12, 0, tzinfo=cuba)
+    ) == 900
