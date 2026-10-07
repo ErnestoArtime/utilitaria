@@ -221,6 +221,20 @@ def test_bank_notification_creates_one_rich_whatsapp_message(tmp_path):
         },
     )
     assert incoming.status_code == 200
+    bizum = client.post(
+        "/api/notifications",
+        headers=capture,
+        json={
+            "external_id": "ing-bizum-rich-1",
+            "package_name": "com.ing.mobile",
+            "title": "ING",
+            "body": (
+                "¡Enhorabuena! Has recibido un Bizum de 440.00 EUR "
+                "de YENIA O. C. por Bizum de Yenia."
+            ),
+        },
+    )
+    assert bizum.status_code == 200
 
     with module.SessionLocal() as db:
         messages = list(
@@ -230,18 +244,24 @@ def test_bank_notification_creates_one_rich_whatsapp_message(tmp_path):
                 )
             )
         )
-    assert len(messages) == 2
+    assert len(messages) == 3
     assert messages[0].event_type == "transfer_sent"
-    assert "📤 Utilitaria · Transferencia realizada" in messages[0].message
+    assert "📤 Utilitaria · Transferencia bancaria realizada" in messages[0].message
+    assert "Medio: Transferencia bancaria" in messages[0].message
     assert "Destinatario: TITANES TELECOMUNICACIONES 237294" in messages[0].message
     assert "Concepto: Movimiento ING" in messages[0].message
     assert "Saldo de Glender: -800.00 EUR" in messages[0].message
     assert "Total común: -800.00 EUR" in messages[0].message
     assert messages[1].event_type == "transfer_received"
-    assert "💰 Utilitaria · Transferencia recibida" in messages[1].message
+    assert "💰 Utilitaria · Transferencia bancaria recibida" in messages[1].message
+    assert "Medio: Transferencia bancaria" in messages[1].message
     assert "De: MARCO SILVESTRI" in messages[1].message
     assert "Saldo de Glender: -690.00 EUR" in messages[1].message
     assert "Total común: -690.00 EUR" in messages[1].message
+    assert "📲 Utilitaria · Bizum recibido" in messages[2].message
+    assert "Medio: Bizum" in messages[2].message
+    assert "De: YENIA O. C." in messages[2].message
+    assert "Importe: 440.00 EUR" in messages[2].message
 
 
 def test_single_alert_check_and_cuba_schedule(tmp_path, monkeypatch):

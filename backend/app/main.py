@@ -649,6 +649,10 @@ def is_outgoing_transfer(title: str | None, body: str) -> bool:
     return any(marker in text_value for marker in outgoing_markers)
 
 
+def is_bizum(title: str | None, body: str) -> bool:
+    return "bizum" in f"{title or ''} {body}".lower()
+
+
 def is_ing_bank_operation(package_name: str, title: str | None, body: str) -> bool:
     normalized_package = package_name.lower().strip()
     normalized_title = (title or "").lower().strip()
@@ -787,6 +791,7 @@ def create_notification(payload: NotificationIn):
         parsed = parse_bank_receipt(payload.title, payload.body)
         purchase = is_card_purchase(payload.title, payload.body)
         outgoing_transfer = is_outgoing_transfer(payload.title, payload.body)
+        bizum = is_bizum(payload.title, payload.body)
         outgoing = outgoing_transfer or purchase
         share_allowed = notification_share_allowed(db, payload)
         values = payload.model_dump(exclude={"received_at"}, exclude_none=True)
@@ -821,13 +826,16 @@ def create_notification(payload: NotificationIn):
                 payload.title, payload.body
             )
             description = (
-                "Transferencia realizada"
+                f"{'Bizum enviado' if bizum else 'Transferencia bancaria realizada'}"
                 f"{f' a {counterparty}' if counterparty else ''}"
                 f"{f' · {transfer_concept}' if transfer_concept else ''}"
                 if outgoing_transfer
                 else "Compra con tarjeta"
                 if purchase
-                else f"Ingreso recibido{f' de {counterparty}' if counterparty else ''}"
+                else (
+                    f"{'Bizum' if bizum else 'Transferencia bancaria'} recibido"
+                    f"{f' de {counterparty}' if counterparty else ''}"
+                )
             )
             db.add(
                 BalanceEntry(
@@ -859,13 +867,16 @@ def create_notification(payload: NotificationIn):
                 payload.title, payload.body
             )
             description = (
-                "Transferencia realizada"
+                f"{'Bizum enviado' if bizum else 'Transferencia bancaria realizada'}"
                 f"{f' a {counterparty}' if counterparty else ''}"
                 f"{f' · {transfer_concept}' if transfer_concept else ''}"
                 if outgoing_transfer
                 else "Compra con tarjeta"
                 if purchase
-                else f"Ingreso recibido{f' de {counterparty}' if counterparty else ''}"
+                else (
+                    f"{'Bizum' if bizum else 'Transferencia bancaria'} recibido"
+                    f"{f' de {counterparty}' if counterparty else ''}"
+                )
             )
             affected_member = "me" if purchase else "cousin"
             balance_text = balance_message(db, [affected_member], currency)
@@ -885,7 +896,9 @@ def create_notification(payload: NotificationIn):
                     details.append(f"Concepto: {transfer_concept}")
                 detail_text = f"\n{'\n'.join(details)}" if details else ""
                 message = (
-                    f"📤 Utilitaria · Transferencia realizada\n"
+                    f"{'📲' if bizum else '📤'} Utilitaria · "
+                    f"{'Bizum enviado' if bizum else 'Transferencia bancaria realizada'}\n"
+                    f"Medio: {'Bizum' if bizum else 'Transferencia bancaria'}\n"
                     f"Importe: {amount:.2f} {currency}{detail_text}\n"
                     f"{balance_text}"
                 )
@@ -893,7 +906,9 @@ def create_notification(payload: NotificationIn):
                 event_type = "transfer_received"
                 sender_text = f"\nDe: {counterparty}" if counterparty else ""
                 message = (
-                    f"💰 Utilitaria · Transferencia recibida\n"
+                    f"{'📲' if bizum else '💰'} Utilitaria · "
+                    f"{'Bizum recibido' if bizum else 'Transferencia bancaria recibida'}\n"
+                    f"Medio: {'Bizum' if bizum else 'Transferencia bancaria'}\n"
                     f"Importe: {amount:.2f} {currency}{sender_text}\n"
                     f"{balance_text}"
                 )
