@@ -572,6 +572,29 @@ def parse_decimal_amount(raw: str) -> Decimal:
     return Decimal(compact)
 
 
+def parse_outgoing_transfer_details(
+    title: str | None, body: str
+) -> tuple[str | None, str | None]:
+    text_value = f"{title or ''} {body}"
+    match = re.search(
+        r"a la cuenta de\s+(.+?)\s+en concepto de\s+(.+?)"
+        r"(?:\s+ya ha llegado(?:\s+a su destino)?|[.!]\s*$|$)",
+        text_value,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return match.group(1).strip(" ."), match.group(2).strip(" .")
+    recipient_match = re.search(
+        r"(?:transferencia|envío).{0,160}?\s+a\s+(.+?)(?:[.!]\s*$|$)",
+        text_value,
+        flags=re.IGNORECASE,
+    )
+    return (
+        recipient_match.group(1).strip(" .") if recipient_match else None,
+        None,
+    )
+
+
 def parse_bank_receipt(title: str | None, body: str) -> tuple[Decimal, str, str | None] | None:
     text_value = f"{title or ''} {body}"
     amount_match = re.search(
@@ -592,6 +615,9 @@ def parse_bank_receipt(title: str | None, body: str) -> tuple[Decimal, str, str 
         flags=re.IGNORECASE,
     )
     counterparty = counterparty_match.group(1).strip() if counterparty_match else None
+    outgoing_counterparty, _ = parse_outgoing_transfer_details(title, body)
+    if outgoing_counterparty:
+        counterparty = outgoing_counterparty
     return amount, currency, counterparty
 
 
@@ -791,8 +817,13 @@ def create_notification(payload: NotificationIn):
             amount, currency, counterparty = parsed
             signed_amount = -amount if outgoing else amount
             kind = "transfer" if outgoing_transfer else "expense" if purchase else "income"
+            _, transfer_concept = parse_outgoing_transfer_details(
+                payload.title, payload.body
+            )
             description = (
                 "Transferencia realizada"
+                f"{f' a {counterparty}' if counterparty else ''}"
+                f"{f' · {transfer_concept}' if transfer_concept else ''}"
                 if outgoing_transfer
                 else "Compra con tarjeta"
                 if purchase
@@ -824,36 +855,54 @@ def create_notification(payload: NotificationIn):
             raise
         db.refresh(item)
         if parsed and share_allowed:
+            _, transfer_concept = parse_outgoing_transfer_details(
+                payload.title, payload.body
+            )
             description = (
                 "Transferencia realizada"
+                f"{f' a {counterparty}' if counterparty else ''}"
+                f"{f' · {transfer_concept}' if transfer_concept else ''}"
                 if outgoing_transfer
                 else "Compra con tarjeta"
                 if purchase
                 else f"Ingreso recibido{f' de {counterparty}' if counterparty else ''}"
             )
-            direction = "realizada" if outgoing else "recibida"
-            counterparty_text = f" de {counterparty}" if counterparty else ""
-            amount_text = f"{amount:.2f} {currency}"
+            affected_member = "me" if purchase else "cousin"
+            balance_text = balance_message(db, [affected_member], currency)
             if purchase:
                 event_type = "balance_changed"
-                message = f"Utilitaria · Compra con tarjeta\n{amount_text}\n{description}"
+                message = (
+                    f"🧾 Utilitaria · Compra con tarjeta\n"
+                    f"Importe: {amount:.2f} {currency}\n"
+                    f"{balance_text}"
+                )
+            elif outgoing_transfer:
+                event_type = "transfer_sent"
+                details = []
+                if counterparty:
+                    details.append(f"Destinatario: {counterparty}")
+                if transfer_concept:
+                    details.append(f"Concepto: {transfer_concept}")
+                detail_text = f"\n{'\n'.join(details)}" if details else ""
+                message = (
+                    f"📤 Utilitaria · Transferencia realizada\n"
+                    f"Importe: {amount:.2f} {currency}{detail_text}\n"
+                    f"{balance_text}"
+                )
             else:
-                event_type = "transfer_sent" if outgoing else "transfer_received"
-                message = f"Utilitaria · Transferencia {direction}\n{amount_text}{counterparty_text}\n{description}"
+                event_type = "transfer_received"
+                sender_text = f"\nDe: {counterparty}" if counterparty else ""
+                message = (
+                    f"💰 Utilitaria · Transferencia recibida\n"
+                    f"Importe: {amount:.2f} {currency}{sender_text}\n"
+                    f"{balance_text}"
+                )
             notify_whatsapp(
                 db,
                 event_type,
                 message,
                 dedupe_key=f"notification:{item.id}:{event_type}",
             )
-            if currency == "EUR":
-                affected_member = "me" if purchase else "cousin"
-                notify_whatsapp(
-                    db,
-                    "balance_changed",
-                    f"Utilitaria · Cambio de saldo\n{balance_message(db, [affected_member])}\nMotivo: {description}",
-                    dedupe_key=f"notification:{item.id}:balance_changed",
-                )
         return item
 
 
@@ -936,20 +985,27 @@ def add_balance_entry(payload: BalanceIn):
             raise
         db.refresh(item)
         if not item.is_business:
+            outgoing = item.amount < 0
             if item.kind == "transfer":
-                notify_whatsapp(
-                    db,
-                    "transfer_sent" if item.amount < 0 else "transfer_received",
-                    f"Utilitaria · Transferencia {'realizada' if item.amount < 0 else 'recibida'}\n"
-                    f"{abs(item.amount):.2f} {item.currency}\n{item.description or 'Sin descripción'}",
-                    dedupe_key=f"balance:{item.id}:transfer",
-                )
+                event_type = "transfer_sent" if outgoing else "transfer_received"
+                icon = "📤" if outgoing else "💰"
+                title = "Transferencia realizada" if outgoing else "Transferencia recibida"
+            elif item.amount < 0:
+                event_type = "balance_changed"
+                icon = "🧾"
+                title = "Gasto"
+            else:
+                event_type = "balance_changed"
+                icon = "💰"
+                title = "Ingreso"
             notify_whatsapp(
                 db,
-                "balance_changed",
-                f"Utilitaria · Cambio de saldo\n{balance_message(db, [item.member], item.currency)}\n"
-                f"Motivo: {item.description or 'Movimiento manual'}",
-                dedupe_key=f"balance:{item.id}:balance_changed",
+                event_type,
+                f"{icon} Utilitaria · {title}\n"
+                f"Importe: {abs(item.amount):.2f} {item.currency}\n"
+                f"Descripción: {item.description or 'Movimiento manual'}\n"
+                f"{balance_message(db, [item.member], item.currency)}",
+                dedupe_key=f"balance:{item.id}:unified",
             )
         return item
 
@@ -994,7 +1050,7 @@ def create_member_transfer(payload: BalanceTransferIn):
         notify_whatsapp(
             db,
             "balance_changed",
-            f"Utilitaria · Ajuste entre personas\n{payload.amount:.2f} {payload.currency}\n"
+            f"🔄 Utilitaria · Ajuste entre personas\n{payload.amount:.2f} {payload.currency}\n"
             f"{member_name(payload.from_member)} → {member_name(payload.to_member)}\n"
             f"{balance_message(db, [payload.from_member, payload.to_member], payload.currency)}\n"
             f"Motivo: {payload.description}",
@@ -1042,7 +1098,7 @@ def update_member_transfer(transfer_group_id: str, payload: BalanceTransferPatch
         notify_whatsapp(
             db,
             "balance_changed",
-            f"Utilitaria · Ajuste actualizado\n{amount:.2f} {debit.currency}\n"
+            f"🔄 Utilitaria · Ajuste actualizado\n{amount:.2f} {debit.currency}\n"
             f"{member_name(from_member)} → {member_name(to_member)}\n"
             f"{balance_message(db, [from_member, to_member], debit.currency)}\n"
             f"Motivo: {description}",

@@ -171,7 +171,7 @@ def test_currency_is_not_mixed_and_linked_transfer_is_atomic(tmp_path):
     with module.SessionLocal() as db:
         update_notice = db.scalar(
             module.select(module.WhatsAppOutbox)
-            .where(module.WhatsAppOutbox.message.like("Utilitaria · Ajuste actualizado%"))
+            .where(module.WhatsAppOutbox.message.like("%Utilitaria · Ajuste actualizado%"))
         )
         assert "Saldo de Glender: -22.00 EUR" in update_notice.message
         assert "Saldo de Ernesto: 22.00 EUR" in update_notice.message
@@ -187,3 +187,56 @@ def test_currency_is_not_mixed_and_linked_transfer_is_atomic(tmp_path):
                 )
             )
         ) == []
+
+
+def test_bank_notification_creates_one_rich_whatsapp_message(tmp_path):
+    module, client = load_app(tmp_path)
+    capture = enroll(client, "capture-test-code", "Capture")
+
+    outgoing = client.post(
+        "/api/notifications",
+        headers=capture,
+        json={
+            "external_id": "ing-outgoing-rich-1",
+            "package_name": "com.ing.mobile",
+            "title": "Tu transferencia ya ha llegado",
+            "body": (
+                "Melissa, la transferencia que ordenaste por importe de 800 eur "
+                "a la cuenta de TITANES TELECOMUNICACIONES 237294 en concepto de "
+                "Movimiento ING ya ha llegado a su destino."
+            ),
+        },
+    )
+    assert outgoing.status_code == 200
+    incoming = client.post(
+        "/api/notifications",
+        headers=capture,
+        json={
+            "external_id": "ing-incoming-rich-1",
+            "package_name": "com.ing.mobile",
+            "title": "Has recibido una transferencia",
+            "body": "Acabas de recibir en tu cuenta una transferencia de 110 euros de MARCO SILVESTRI.",
+        },
+    )
+    assert incoming.status_code == 200
+
+    with module.SessionLocal() as db:
+        messages = list(
+            db.scalars(
+                module.select(module.WhatsAppOutbox).order_by(
+                    module.WhatsAppOutbox.id
+                )
+            )
+        )
+    assert len(messages) == 2
+    assert messages[0].event_type == "transfer_sent"
+    assert "📤 Utilitaria · Transferencia realizada" in messages[0].message
+    assert "Destinatario: TITANES TELECOMUNICACIONES 237294" in messages[0].message
+    assert "Concepto: Movimiento ING" in messages[0].message
+    assert "Saldo de Glender: -800.00 EUR" in messages[0].message
+    assert "Total común: -800.00 EUR" in messages[0].message
+    assert messages[1].event_type == "transfer_received"
+    assert "💰 Utilitaria · Transferencia recibida" in messages[1].message
+    assert "De: MARCO SILVESTRI" in messages[1].message
+    assert "Saldo de Glender: -690.00 EUR" in messages[1].message
+    assert "Total común: -690.00 EUR" in messages[1].message
