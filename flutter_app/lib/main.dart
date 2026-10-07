@@ -976,16 +976,53 @@ class _FinancePageState extends State<FinancePage> {
   }
 
   Future<void> _editMovement(Map<String, dynamic> entry) async {
+    final groupId = entry['transfer_group_id']?.toString();
+    if (groupId != null && groupId.isNotEmpty) {
+      await _editMemberTransfer(entry, groupId);
+      return;
+    }
+    final amount = TextEditingController(
+        text: (double.tryParse('${entry['amount']}') ?? 0).abs().toStringAsFixed(2));
+    String kind = '${entry['kind'] ?? 'adjustment'}';
+    if (!{'income', 'expense', 'transfer'}.contains(kind)) {
+      kind = (double.tryParse('${entry['amount']}') ?? 0) >= 0
+          ? 'income'
+          : 'expense';
+    }
     String member = '${entry['member'] ?? 'shared'}';
     bool business = entry['is_business'] == true;
     final description = TextEditingController(text: '${entry['description']}');
+    DateTime createdAt =
+        DateTime.tryParse('${entry['created_at']}')?.toLocal() ?? DateTime.now();
     await showDialog(
         context: context,
         builder: (_) => StatefulBuilder(
             builder: (context, setDialog) => AlertDialog(
-                  title: const Text('Detallar movimiento'),
+                  title: const Text('Editar movimiento'),
                   content: SingleChildScrollView(
                       child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    DropdownButtonFormField<String>(
+                        initialValue: kind,
+                        decoration: const InputDecoration(
+                            labelText: 'Tipo de movimiento'),
+                        items: const [
+                          DropdownMenuItem(
+                              value: 'income', child: Text('Ingreso')),
+                          DropdownMenuItem(
+                              value: 'expense', child: Text('Gasto')),
+                          DropdownMenuItem(
+                              value: 'transfer',
+                              child: Text('Transferencia realizada')),
+                        ],
+                        onChanged: (value) => setDialog(() => kind = value!)),
+                    const SizedBox(height: 12),
+                    TextField(
+                        controller: amount,
+                        keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true),
+                        decoration: const InputDecoration(
+                            labelText: 'Importe', prefixText: '€ ')),
+                    const SizedBox(height: 12),
                     TextField(
                         controller: description,
                         decoration:
@@ -1012,25 +1049,56 @@ class _FinancePageState extends State<FinancePage> {
                         subtitle: const Text('Excluir del saldo común'),
                         onChanged: (value) =>
                             setDialog(() => business = value)),
+                    ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.schedule_rounded),
+                        title: const Text('Fecha y hora'),
+                        subtitle: Text(_dateTime(createdAt.toIso8601String())),
+                        onTap: () async {
+                          final value = await _pickDateTime(createdAt);
+                          if (value != null) {
+                            setDialog(() => createdAt = value);
+                          }
+                        }),
                   ])),
                   actions: [
+                    TextButton.icon(
+                        onPressed: () async {
+                          if (!await _confirmDelete(context)) return;
+                          await api.delete(
+                              '/api/balance/entries/${entry['id']}');
+                          if (context.mounted) Navigator.pop(context);
+                          load();
+                        },
+                        icon: const Icon(Icons.delete_outline),
+                        label: const Text('Eliminar')),
                     TextButton(
                         onPressed: () => Navigator.pop(context),
                         child: const Text('Cancelar')),
                     FilledButton(
                         onPressed: () async {
+                          final value = double.tryParse(
+                              amount.text.trim().replaceAll(',', '.'));
+                          if (value == null ||
+                              value <= 0 ||
+                              description.text.trim().isEmpty) {
+                            return;
+                          }
                           await api
                               .patch('/api/balance/entries/${entry['id']}', {
+                            'amount': kind == 'income' ? value : -value,
                             'description': description.text.trim(),
+                            'kind': kind,
                             'member': member,
                             'is_business': business,
                             'category': business
                                 ? 'business'
-                                : (double.tryParse('${entry['amount']}') ??
-                                            0) >=
-                                        0
+                                : kind == 'income'
                                     ? 'income'
-                                    : 'expense'
+                                    : kind == 'transfer'
+                                        ? 'transfer'
+                                        : 'expense',
+                            'created_at': createdAt.toUtc().toIso8601String(),
                           });
                           if (context.mounted) Navigator.pop(context);
                           load();
@@ -1039,6 +1107,146 @@ class _FinancePageState extends State<FinancePage> {
                   ],
                 )));
   }
+
+  Future<void> _editMemberTransfer(
+      Map<String, dynamic> entry, String groupId) async {
+    final rows = entries
+        .where((raw) =>
+            (raw as Map<String, dynamic>)['transfer_group_id'] == groupId)
+        .cast<Map<String, dynamic>>()
+        .toList();
+    final debit = rows.where((row) =>
+        (double.tryParse('${row['amount']}') ?? 0) < 0).firstOrNull;
+    final credit = rows.where((row) =>
+        (double.tryParse('${row['amount']}') ?? 0) > 0).firstOrNull;
+    if (debit == null || credit == null) return;
+    final amount = TextEditingController(
+        text: (double.tryParse('${debit['amount']}') ?? 0)
+            .abs()
+            .toStringAsFixed(2));
+    final rawDescription = '${debit['description']}';
+    final description = TextEditingController(
+        text: rawDescription.split(' · sale de ').first);
+    String fromMember = '${debit['member']}';
+    String toMember = '${credit['member']}';
+    DateTime createdAt =
+        DateTime.tryParse('${debit['created_at']}')?.toLocal() ?? DateTime.now();
+    await showDialog(
+        context: context,
+        builder: (_) => StatefulBuilder(
+            builder: (context, setDialog) => AlertDialog(
+                  title: const Text('Editar ajuste de saldos'),
+                  content: SingleChildScrollView(
+                      child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    TextField(
+                        controller: amount,
+                        keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true),
+                        decoration: const InputDecoration(
+                            labelText: 'Importe', prefixText: '€ ')),
+                    const SizedBox(height: 12),
+                    TextField(
+                        controller: description,
+                        decoration:
+                            const InputDecoration(labelText: 'Descripción')),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                        initialValue: fromMember,
+                        decoration: const InputDecoration(labelText: 'Sale de'),
+                        items: _memberItems(),
+                        onChanged: (value) =>
+                            setDialog(() => fromMember = value!)),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                        initialValue: toMember,
+                        decoration: const InputDecoration(labelText: 'Se suma a'),
+                        items: _memberItems(),
+                        onChanged: (value) =>
+                            setDialog(() => toMember = value!)),
+                    ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.schedule_rounded),
+                        title: const Text('Fecha y hora'),
+                        subtitle: Text(_dateTime(createdAt.toIso8601String())),
+                        onTap: () async {
+                          final value = await _pickDateTime(createdAt);
+                          if (value != null) setDialog(() => createdAt = value);
+                        }),
+                  ])),
+                  actions: [
+                    TextButton.icon(
+                        onPressed: () async {
+                          if (!await _confirmDelete(context)) return;
+                          await api.delete('/api/balance/transfers/$groupId');
+                          if (context.mounted) Navigator.pop(context);
+                          load();
+                        },
+                        icon: const Icon(Icons.delete_outline),
+                        label: const Text('Eliminar')),
+                    TextButton(
+                        onPressed: () => Navigator.pop(context),
+                        child: const Text('Cancelar')),
+                    FilledButton(
+                        onPressed: () async {
+                          final value = double.tryParse(
+                              amount.text.trim().replaceAll(',', '.'));
+                          if (value == null ||
+                              value <= 0 ||
+                              fromMember == toMember ||
+                              description.text.trim().isEmpty) {
+                            return;
+                          }
+                          await api.patch('/api/balance/transfers/$groupId', {
+                            'amount': value,
+                            'description': description.text.trim(),
+                            'from_member': fromMember,
+                            'to_member': toMember,
+                            'created_at': createdAt.toUtc().toIso8601String(),
+                          });
+                          if (context.mounted) Navigator.pop(context);
+                          load();
+                        },
+                        child: const Text('Guardar'))
+                  ],
+                )));
+  }
+
+  List<DropdownMenuItem<String>> _memberItems() => const [
+        DropdownMenuItem(value: 'me', child: Text('Ernesto')),
+        DropdownMenuItem(value: 'cousin', child: Text('Glender')),
+        DropdownMenuItem(value: 'shared', child: Text('Saldo común')),
+      ];
+
+  Future<DateTime?> _pickDateTime(DateTime initial) async {
+    final date = await showDatePicker(
+        context: context,
+        initialDate: initial,
+        firstDate: DateTime(2020),
+        lastDate: DateTime.now().add(const Duration(days: 365)));
+    if (date == null || !mounted) return null;
+    final time = await showTimePicker(
+        context: context, initialTime: TimeOfDay.fromDateTime(initial));
+    if (time == null) return null;
+    return DateTime(date.year, date.month, date.day, time.hour, time.minute);
+  }
+
+  Future<bool> _confirmDelete(BuildContext dialogContext) async =>
+      await showDialog<bool>(
+          context: dialogContext,
+          builder: (context) => AlertDialog(
+                title: const Text('Eliminar movimiento'),
+                content: const Text(
+                    'Esta acción eliminará el movimiento y recalculará los saldos.'),
+                actions: [
+                  TextButton(
+                      onPressed: () => Navigator.pop(context, false),
+                      child: const Text('Cancelar')),
+                  FilledButton(
+                      onPressed: () => Navigator.pop(context, true),
+                      child: const Text('Eliminar')),
+                ],
+              )) ??
+      false;
 }
 
 class _MovementCard extends StatelessWidget {

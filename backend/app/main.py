@@ -192,7 +192,7 @@ app.add_middleware(
         "http://localhost:8125",
     ],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
 
@@ -368,6 +368,7 @@ class BalanceTransferPatch(BaseModel):
     description: str | None = Field(default=None, min_length=1, max_length=500)
     from_member: str | None = Field(default=None, pattern="^(me|cousin|shared)$")
     to_member: str | None = Field(default=None, pattern="^(me|cousin|shared)$")
+    created_at: datetime | None = None
 
 
 class BalanceOut(BalanceIn):
@@ -384,6 +385,16 @@ class BalancePatch(BaseModel):
     category: str | None = None
     member: str | None = None
     is_business: bool | None = None
+    created_at: datetime | None = None
+
+
+def normalized_balance_amount(amount: Decimal, kind: str, category: str) -> Decimal:
+    value = abs(amount)
+    if kind in {"expense", "transfer"} or category == "expense":
+        return -value
+    if kind == "income" or category == "income":
+        return value
+    return amount
 
 
 class NotificationPatch(BaseModel):
@@ -904,6 +915,9 @@ def add_balance_entry(payload: BalanceIn):
             if existing:
                 return existing
         values = payload.model_dump(exclude={"created_at"}, exclude_none=True)
+        values["amount"] = normalized_balance_amount(
+            payload.amount, payload.kind, payload.category
+        )
         item = BalanceEntry(
             **values,
             created_at=payload.created_at or datetime.now(timezone.utc),
@@ -1007,7 +1021,7 @@ def update_member_transfer(transfer_group_id: str, payload: BalanceTransferPatch
         credit = next((row for row in rows if row.amount > 0), None)
         if not debit or not credit:
             raise HTTPException(status_code=409, detail="linked transfer is inconsistent")
-        amount = payload.amount or abs(debit.amount)
+        amount = payload.amount if payload.amount is not None else abs(debit.amount)
         from_member = payload.from_member or debit.member
         to_member = payload.to_member or credit.member
         if from_member == to_member:
@@ -1019,6 +1033,9 @@ def update_member_transfer(transfer_group_id: str, payload: BalanceTransferPatch
         credit.amount = amount
         credit.member = to_member
         credit.description = f"{description} · entra a {member_name(to_member)}"
+        if payload.created_at is not None:
+            debit.created_at = payload.created_at
+            credit.created_at = payload.created_at
         db.commit()
         db.refresh(debit)
         db.refresh(credit)
@@ -1074,11 +1091,60 @@ def update_balance_entry(entry_id: int, payload: BalancePatch):
                 status_code=409,
                 detail="Los ajustes entre personas deben editarse como una operación vinculada",
             )
-        for key, value in payload.model_dump(exclude_none=True).items():
+        changes = payload.model_dump(exclude_none=True)
+        future_kind = changes.get("kind", item.kind)
+        future_category = changes.get("category", item.category)
+        if "amount" in changes or "kind" in changes or "category" in changes:
+            changes["amount"] = normalized_balance_amount(
+                changes.get("amount", item.amount), future_kind, future_category
+            )
+        for key, value in changes.items():
             setattr(item, key, value)
         db.commit()
         db.refresh(item)
         return item
+
+
+@app.delete(
+    "/api/balance/entries/{entry_id}",
+    status_code=204,
+    dependencies=[Depends(require_permission("write"))],
+)
+def delete_balance_entry(entry_id: int):
+    with SessionLocal() as db:
+        item = db.get(BalanceEntry, entry_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="balance entry not found")
+        if item.transfer_group_id or item.kind == "member_transfer":
+            raise HTTPException(
+                status_code=409,
+                detail="Los ajustes entre personas deben eliminarse como una operación vinculada",
+            )
+        db.delete(item)
+        db.commit()
+        return Response(status_code=204)
+
+
+@app.delete(
+    "/api/balance/transfers/{transfer_group_id}",
+    status_code=204,
+    dependencies=[Depends(require_permission("write"))],
+)
+def delete_member_transfer(transfer_group_id: str):
+    with SessionLocal() as db:
+        rows = list(
+            db.scalars(
+                select(BalanceEntry).where(
+                    BalanceEntry.transfer_group_id == transfer_group_id
+                )
+            )
+        )
+        if len(rows) != 2:
+            raise HTTPException(status_code=404, detail="linked transfer not found")
+        for row in rows:
+            db.delete(row)
+        db.commit()
+        return Response(status_code=204)
 
 
 @app.get("/api/finance/summary", dependencies=[Depends(require_permission("read"))])

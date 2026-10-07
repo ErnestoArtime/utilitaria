@@ -98,6 +98,39 @@ def test_currency_is_not_mixed_and_linked_transfer_is_atomic(tmp_path):
     assert Decimal(summary.json()["balance"]) == Decimal("10")
     assert Decimal(summary.json()["by_currency"]["USD"]) == Decimal("20")
 
+    expense = client.post(
+        "/api/balance/entries",
+        headers=admin,
+        json={
+            "amount": 55.63,
+            "description": "Gastos",
+            "kind": "expense",
+            "category": "expense",
+            "member": "me",
+        },
+    )
+    assert expense.status_code == 200
+    assert Decimal(expense.json()["amount"]) == Decimal("-55.63")
+    edited_expense = client.patch(
+        f"/api/balance/entries/{expense.json()['id']}",
+        headers=admin,
+        json={
+            "amount": -12.5,
+            "description": "Ingreso corregido",
+            "kind": "income",
+            "category": "income",
+            "member": "cousin",
+            "created_at": "2026-10-07T10:57:00Z",
+        },
+    )
+    assert edited_expense.status_code == 200
+    assert Decimal(edited_expense.json()["amount"]) == Decimal("12.50")
+    assert edited_expense.json()["member"] == "cousin"
+    assert edited_expense.json()["created_at"].startswith("2026-10-07T10:57:00")
+    assert client.delete(
+        f"/api/balance/entries/{expense.json()['id']}", headers=admin
+    ).status_code == 204
+
     created = client.post(
         "/api/balance/transfers",
         headers=admin,
@@ -143,3 +176,14 @@ def test_currency_is_not_mixed_and_linked_transfer_is_atomic(tmp_path):
         assert "Saldo de Glender: -22.00 EUR" in update_notice.message
         assert "Saldo de Ernesto: 22.00 EUR" in update_notice.message
         assert "Total común: 10.00 EUR" in update_notice.message
+    assert client.delete(
+        f"/api/balance/transfers/{group_id}", headers=admin
+    ).status_code == 204
+    with module.SessionLocal() as db:
+        assert list(
+            db.scalars(
+                module.select(module.BalanceEntry).where(
+                    module.BalanceEntry.transfer_group_id == group_id
+                )
+            )
+        ) == []

@@ -189,6 +189,13 @@ class ApiClient {
     if (response.statusCode >= 400) throw _error(response);
     return jsonDecode(response.body);
   }
+
+  Future<void> delete(String path) async {
+    final response = await _httpClient
+        .delete(Uri.parse('$baseUrl$path'), headers: await _headers())
+        .timeout(const Duration(seconds: 12));
+    if (response.statusCode >= 400) throw _error(response);
+  }
 }
 
 String readableApiError(Object error) {
