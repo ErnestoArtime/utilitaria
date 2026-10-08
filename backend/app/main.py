@@ -862,7 +862,9 @@ def create_notification(payload: NotificationIn):
                     return existing
             raise
         db.refresh(item)
-        if parsed and share_allowed:
+        # Card purchases are personal expenses assigned to Ernesto. They stay in
+        # the ledger, but must not leak into the WhatsApp group shared with Glender.
+        if parsed and share_allowed and not purchase:
             _, transfer_concept = parse_outgoing_transfer_details(
                 payload.title, payload.body
             )
@@ -999,7 +1001,10 @@ def add_balance_entry(payload: BalanceIn):
                     return existing
             raise
         db.refresh(item)
-        if not item.is_business:
+        personal_expense = (
+            item.member == "me" and item.amount < 0 and item.kind != "transfer"
+        )
+        if not item.is_business and not personal_expense:
             outgoing = item.amount < 0
             if item.kind == "transfer":
                 event_type = "transfer_sent" if outgoing else "transfer_received"

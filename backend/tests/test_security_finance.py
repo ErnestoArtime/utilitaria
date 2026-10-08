@@ -113,6 +113,14 @@ def test_currency_is_not_mixed_and_linked_transfer_is_atomic(tmp_path):
     )
     assert expense.status_code == 200
     assert Decimal(expense.json()["amount"]) == Decimal("-55.63")
+    with module.SessionLocal() as db:
+        personal_expense_notice = db.scalar(
+            module.select(module.WhatsAppOutbox).where(
+                module.WhatsAppOutbox.dedupe_key
+                == f"balance:{expense.json()['id']}:unified"
+            )
+        )
+        assert personal_expense_notice is None
     edited_expense = client.patch(
         f"/api/balance/entries/{expense.json()['id']}",
         headers=admin,
@@ -235,6 +243,20 @@ def test_bank_notification_creates_one_rich_whatsapp_message(tmp_path):
         },
     )
     assert bizum.status_code == 200
+    purchase = client.post(
+        "/api/notifications",
+        headers=capture,
+        json={
+            "external_id": "ing-personal-purchase-1",
+            "package_name": "com.ing.mobile",
+            "title": "ING",
+            "body": (
+                "¡Pago realizado! Has hecho una compra de 72 eur en "
+                "BLOQUES HORMIGON con tu tarjeta de débito."
+            ),
+        },
+    )
+    assert purchase.status_code == 200
 
     with module.SessionLocal() as db:
         messages = list(
@@ -262,6 +284,15 @@ def test_bank_notification_creates_one_rich_whatsapp_message(tmp_path):
     assert "Medio: Bizum" in messages[2].message
     assert "De: YENIA O. C." in messages[2].message
     assert "Importe: 440.00 EUR" in messages[2].message
+    with module.SessionLocal() as db:
+        purchase_entry = db.scalar(
+            module.select(module.BalanceEntry).where(
+                module.BalanceEntry.notification_id == purchase.json()["id"]
+            )
+        )
+        assert purchase_entry is not None
+        assert purchase_entry.member == "me"
+        assert purchase_entry.amount == Decimal("-72")
 
 
 def test_single_alert_check_and_cuba_schedule(tmp_path, monkeypatch):
