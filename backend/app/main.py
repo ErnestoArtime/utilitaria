@@ -1352,7 +1352,7 @@ def list_alerts():
 
 
 async def check_alert_target(db: Session, target: AlertTarget) -> dict:
-    from app.alerts import CHECKERS
+    from app.alerts import CHECKERS, gas_refill_notice
 
     if not target.enabled or target.slug not in CHECKERS:
         raise HTTPException(status_code=404, detail="alert target not available")
@@ -1360,6 +1360,10 @@ async def check_alert_target(db: Session, target: AlertTarget) -> dict:
         result = await CHECKERS[target.slug]()
         checked_at = datetime.now(timezone.utc)
         previous_status = target.status
+        refill_notice = (
+            gas_refill_notice(result.get("details") or {}, target.details or {})
+            if target.group_name == "gas" else None
+        )
         changed = target.fingerprint is not None and target.fingerprint != result["fingerprint"]
         target.status = result["status"]
         target.status_label = result["status_label"]
@@ -1371,13 +1375,12 @@ async def check_alert_target(db: Session, target: AlertTarget) -> dict:
         push_result = None
         if changed:
             target.last_changed_at = checked_at
-            if target.group_name == "gas" and target.status == "available":
-                title = "¡Hay bombonas de gas disponibles!"
-            elif target.group_name == "gas":
-                title = "Cambió el estado de la bombona de gas"
+        if changed and (target.group_name != "gas" or refill_notice):
+            if target.group_name == "gas":
+                title = "¡Hay recargas de gas disponibles!"
             else:
                 title = "Cambios en TiendaSolar"
-            message = f"{target.name}: {target.status_label}"
+            message = refill_notice if target.group_name == "gas" else f"{target.name}: {target.status_label}"
             event = AlertEvent(
                 target_id=target.id,
                 previous_status=previous_status,

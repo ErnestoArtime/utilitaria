@@ -1,7 +1,7 @@
 import html
 import json
 
-from app.alerts import parse_goniogas
+from app.alerts import parse_goniogas, gas_refill_notice
 
 
 def product(variants):
@@ -51,3 +51,23 @@ def test_pickup_locations_and_changes_are_tracked_independently():
     assert len(first["price"]) > 50
     variants[2]["availability_html"] = '<p>60 disponibles</p>'
     assert parse_goniogas(product(variants))["fingerprint"] != first["fingerprint"]
+
+
+def test_notify_only_when_refills_available_and_refills_change():
+    def snapshot(refill_quantity, complete_quantity):
+        return parse_goniogas(product([
+            variant("Recarga", refill_quantity, 42, 1),
+            variant("Cilindro completo", complete_quantity, 70, 2),
+        ]))["details"]
+
+    empty = snapshot(0, 0)
+    complete_only = snapshot(0, 61)
+    refill = snapshot(10, 61)
+    assert gas_refill_notice(complete_only, empty) is None
+    assert gas_refill_notice(empty, refill) is None
+    assert gas_refill_notice(refill, refill) is None
+    assert gas_refill_notice(snapshot(10, 60), refill) is None
+    notice = gas_refill_notice(refill, complete_only)
+    assert "Recarga: 10 disponibles" in notice
+    assert "Cilindro completo" not in notice
+    assert gas_refill_notice(snapshot(9, 61), refill) is not None

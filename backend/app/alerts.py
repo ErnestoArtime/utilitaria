@@ -131,6 +131,26 @@ def parse_goniogas(page: str) -> dict:
     }
 
 
+def gas_refill_notice(details: dict, previous_details: dict) -> str | None:
+    def refills(snapshot):
+        return sorted(
+            [item for item in snapshot.get("variants", [])
+             if re.match(r"^recarga\b", item.get("name", ""), re.I)],
+            key=lambda item: str(item.get("id")),
+        )
+
+    current = refills(details)
+    available = [item for item in current if item.get("available")]
+    if not available or current == refills(previous_details):
+        return None
+    return " · ".join(
+        f"{item['name']}: "
+        + (f"{item['quantity']:g} disponibles" if item.get("quantity") is not None else "Disponible")
+        + (f" · {item['price']:.2f} €" if isinstance(item.get("price"), (int, float)) else "")
+        for item in available
+    )
+
+
 async def check_goniogas() -> dict:
     headers = {
         "Accept": "text/html,application/xhtml+xml",
