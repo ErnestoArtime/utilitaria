@@ -2,18 +2,12 @@ import asyncio
 from datetime import datetime
 import os
 import time
-from zoneinfo import ZoneInfo
 
 import httpx
 
 
 def gas_interval_seconds(now: datetime | None = None) -> int:
-    cuba_now = now or datetime.now(ZoneInfo("America/Havana"))
-    minutes = cuba_now.hour * 60 + cuba_now.minute
-    peak = 19 * 60 + 30 <= minutes < 21 * 60 + 30
-    setting = "GAS_PEAK_INTERVAL_SECONDS" if peak else "GAS_OFFPEAK_INTERVAL_SECONDS"
-    default = "60" if peak else "900"
-    return max(60, int(os.getenv(setting, default)))
+    return max(900, int(os.getenv("GAS_CHECK_INTERVAL_SECONDS", "900")))
 
 
 async def main():
@@ -47,7 +41,7 @@ async def main():
                     next_check = time.monotonic() + interval
                 except Exception as exc:
                     print(f"{slug} check failed: {exc}", flush=True)
-                    next_check = time.monotonic() + 15
+                    next_check = time.monotonic() + (interval if slug == "gas-10kg-goniogas" else 15)
                 if slug == "gas-10kg-goniogas":
                     next_gas_check = next_check
                 else:

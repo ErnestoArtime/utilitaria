@@ -295,7 +295,7 @@ def test_bank_notification_creates_one_rich_whatsapp_message(tmp_path):
         assert purchase_entry.amount == Decimal("-72")
 
 
-def test_single_alert_check_and_cuba_schedule(tmp_path, monkeypatch):
+def test_single_alert_check_and_uniform_gas_schedule(tmp_path, monkeypatch):
     module, client = load_app(tmp_path)
     admin = enroll(client, "admin-test-code", "Admin")
     from app import alerts, monitor
@@ -321,10 +321,30 @@ def test_single_alert_check_and_cuba_schedule(tmp_path, monkeypatch):
     assert gas["details"]["quantity"] == 4
     assert gas["last_checked_at"] is not None
 
+    # A failed flush must be rolled back before recording the check error.
+    from sqlalchemy.exc import IntegrityError
+    import asyncio
+
+    with module.SessionLocal() as db:
+        target = db.scalar(module.select(module.AlertTarget).where(
+            module.AlertTarget.slug == "gas-10kg-goniogas"
+        ))
+        original_flush = db.flush
+
+        def failing_flush(*args, **kwargs):
+            monkeypatch.setattr(db, "flush", original_flush)
+            raise IntegrityError("test flush", {}, Exception("database write failed"))
+
+        monkeypatch.setattr(db, "flush", failing_flush)
+        result = asyncio.run(module.check_alert_target(db, target))
+        assert result["ok"] is False
+        assert "database write failed" in result["error"]
+        assert db.get(module.AlertTarget, target.id).last_error is not None
+
     cuba = ZoneInfo("America/Havana")
     assert monitor.gas_interval_seconds(
         datetime(2026, 10, 7, 20, 0, tzinfo=cuba)
-    ) == 60
+    ) == 900
     assert monitor.gas_interval_seconds(
         datetime(2026, 10, 7, 12, 0, tzinfo=cuba)
     ) == 900

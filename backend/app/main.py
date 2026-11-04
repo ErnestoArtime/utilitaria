@@ -79,8 +79,8 @@ class AlertTarget(Base):
     name: Mapped[str] = mapped_column(String(255))
     url: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(50), default="unknown")
-    status_label: Mapped[str] = mapped_column(String(255), default="Pendiente")
-    price: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    status_label: Mapped[str] = mapped_column(Text, default="Pendiente")
+    price: Mapped[str | None] = mapped_column(Text, nullable=True)
     fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -174,6 +174,11 @@ def ensure_schema():
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_balance_entries_external_id ON balance_entries (external_id) WHERE external_id IS NOT NULL",
         "CREATE INDEX IF NOT EXISTS ix_balance_entries_transfer_group_id ON balance_entries (transfer_group_id)",
     ]
+    if engine.dialect.name == "postgresql":
+        statements.extend([
+            "ALTER TABLE alert_targets ALTER COLUMN price TYPE TEXT",
+            "ALTER TABLE alert_targets ALTER COLUMN status_label TYPE TEXT",
+        ])
     with engine.begin() as connection:
         for statement in statements:
             try:
@@ -1394,6 +1399,7 @@ async def check_alert_target(db: Session, target: AlertTarget) -> dict:
             "push": push_result,
         }
     except Exception as exc:
+        db.rollback()
         checked_at = datetime.now(timezone.utc)
         target.last_checked_at = checked_at
         target.last_error = str(exc)[:1000]
